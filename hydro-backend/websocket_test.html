@@ -1,0 +1,52 @@
+<!-- test/ws_test.html
+     Throwaway test page — not part of the app, just to visually confirm
+     the WebSocket broadcast works before the real React frontend exists.
+     Open this file directly in a browser (double-click it, or
+     `open test/ws_test.html` on macOS) while cmd/api/main.go is running.
+-->
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Hydroponics WS Test</title>
+    <style>
+        body { font-family: monospace; background: #111; color: #0f0; padding: 20px; }
+        #status { color: #ff0; margin-bottom: 10px; }
+        .reading { border-bottom: 1px solid #333; padding: 6px 0; }
+    </style>
+</head>
+<body>
+<h2>Live Telemetry (WebSocket test)</h2>
+<div id="status">connecting...</div>
+<div id="log"></div>
+
+<script>
+    const statusEl = document.getElementById("status");
+    const logEl = document.getElementById("log");
+
+    const ws = new WebSocket("ws://localhost:8080/ws");
+
+    ws.onopen = () => {
+        statusEl.textContent = "✅ connected";
+    };
+
+    ws.onmessage = (event) => {
+        const reading = JSON.parse(event.data);
+        const line = document.createElement("div");
+        line.className = "reading";
+        line.textContent =
+            `[${reading.recorded_at}] device=${reading.device_id} ` +
+            `ph=${reading.ph} ec=${reading.ec_ms_cm} water=${reading.water_temp_c}°C`;
+        logEl.prepend(line); // newest on top
+    };
+
+    ws.onclose = () => {
+        statusEl.textContent = "🔴 disconnected";
+    };
+
+    ws.onerror = (err) => {
+        statusEl.textContent = "⚠️ error (see console)";
+        console.error(err);
+    };
+</script>
+</body>
+</html>
