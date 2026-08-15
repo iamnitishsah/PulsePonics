@@ -119,7 +119,7 @@ GET /readings/latest
 - Go installed
 - MySQL running
 - MQTT broker running, for MQTT ingestion
-- Database user with access to `hydrodb`
+- Database user with access to `pulseponics_db` and `readings` table
 
 The module currently declares Go `1.26.5` in `go.mod`.
 
@@ -128,11 +128,11 @@ The module currently declares Go `1.26.5` in `go.mod`.
 Create `pulse-backend/.env` for local development:
 
 ```env
-DB_USER=hydrodb_admin
+DB_USER=pulseponics_admin
 DB_PASSWORD=your_password
 DB_HOST=127.0.0.1
 DB_PORT=3306
-DB_NAME=hydrodb
+DB_NAME=pulseponics_db
 SERVER_PORT=8080
 MQTT_BROKER_URL=tcp://localhost:1883
 ```
@@ -157,7 +157,7 @@ mysql -u root -p < migrations/001_create_readings.sql
 
 The migration creates:
 
-- `hydrodb` database
+- `pulseponics_db` database         
 - `readings` table
 - `(device_id, recorded_at)` index for dashboard history queries
 
@@ -258,7 +258,6 @@ Fetch latest:
 curl "http://localhost:8080/readings/latest?device_id=esp32-tank-01"
 ```
 
-For WebSocket testing, open `websocket_test.html` in a browser while the backend is running.
 
 ## Known Limitations
 

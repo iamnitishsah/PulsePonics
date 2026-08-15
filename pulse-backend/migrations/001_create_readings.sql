@@ -11,11 +11,11 @@
 -- - Nullable sensor columns: if one sensor fails/is unplugged, you still want
 --   to store the rest of the payload rather than rejecting the whole insert.
 
-CREATE DATABASE IF NOT EXISTS hydrodb
+CREATE DATABASE IF NOT EXISTS pulseponics_db
     CHARACTER SET utf8mb4
     COLLATE utf8mb4_unicode_ci;
 
-USE hydrodb;
+USE pulseponics_db;
 
 CREATE TABLE IF NOT EXISTS readings (
                                         id            BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
