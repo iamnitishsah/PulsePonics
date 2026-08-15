@@ -1,5 +1,4 @@
-// internal/ws/hub.go
-package websocket
+package realtime
 
 import (
 	"encoding/json"
@@ -7,8 +6,6 @@ import (
 	"sync"
 
 	"github.com/gorilla/websocket"
-
-	"hydro-backend/internal/domain"
 )
 
 // Hub tracks every currently-connected WebSocket client and fans out
@@ -54,12 +51,9 @@ func (h *Hub) Unregister(conn *websocket.Conn) {
 	}
 }
 
-// Broadcast sends a reading to every connected client as JSON. This is
-// called from ReadingService right after a successful insert — so both
-// HTTP-submitted and MQTT-submitted readings trigger the same broadcast,
-// identical to how both already share the same validation and storage path.
-func (h *Hub) Broadcast(reading domain.Reading) {
-	data, err := json.Marshal(reading)
+// Broadcast sends a payload to every connected client as JSON.
+func (h *Hub) Broadcast(payload any) {
+	data, err := json.Marshal(payload)
 	if err != nil {
 		log.Printf("ws: failed to marshal reading for broadcast: %v", err)
 		return

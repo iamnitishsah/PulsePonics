@@ -1,5 +1,4 @@
-// internal/handler/middleware.go
-package handler
+package httpmiddleware
 
 import (
 	"bufio"
@@ -39,15 +38,10 @@ func (r *responseRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return hijacker.Hijack()
 }
 
-// Logger is middleware that logs every request the way uvicorn/FastAPI
-// does: method, path, status code, and duration. Wrap your mux with this
-// once in main.go and every request gets logged automatically.
 func Logger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
-		// Default to 200 in case the handler never explicitly calls
-		// WriteHeader (e.g. it just writes a body directly).
 		rec := &responseRecorder{ResponseWriter: w, statusCode: http.StatusOK}
 
 		next.ServeHTTP(rec, r)

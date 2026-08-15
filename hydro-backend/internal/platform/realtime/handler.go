@@ -1,5 +1,4 @@
-// internal/ws/handler.go
-package websocket
+package realtime
 
 import (
 	"log"

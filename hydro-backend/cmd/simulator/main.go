@@ -17,8 +17,8 @@ import (
 	paho "github.com/eclipse/paho.mqtt.golang"
 )
 
-// telemetryPayload mirrors domain.NewReadingInput's JSON shape. We don't
-// import the domain package here on purpose — this simulator represents
+// telemetryPayload mirrors the readings feature's NewReadingInput JSON shape.
+// We don't import that package here on purpose — this simulator represents
 // an entirely separate physical device (the ESP32) that has no knowledge
 // of your Go backend's internal types. It only needs to agree on the JSON
 // wire format, exactly like real firmware would.
@@ -39,7 +39,7 @@ func main() {
 	//   go run cmd/simulator/main.go -device esp32-tank-02 -interval 10s
 	brokerURL := flag.String("broker", "tcp://localhost:1883", "MQTT broker URL")
 	deviceID := flag.String("device", "esp32-tank-01", "simulated device ID")
-	interval := flag.Duration("interval", 60*time.Second, "publish interval")
+	interval := flag.Duration("interval", 10*time.Second, "publish interval")
 	flag.Parse()
 
 	topic := "hydroponics/" + *deviceID + "/telemetry"

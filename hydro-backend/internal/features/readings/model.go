@@ -1,4 +1,4 @@
-package domain
+package readings
 
 import "time"
 

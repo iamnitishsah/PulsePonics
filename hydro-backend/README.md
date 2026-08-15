@@ -48,18 +48,18 @@ Press `Ctrl+C` to stop — the server drains in-flight requests before shutting 
 ```
 cmd/api/main.go        — entrypoint, wires everything together
 internal/config        — env var loading
-internal/domain        — data models (Reading, NewReadingInput)
-internal/repository    — MySQL access via sqlx (interface + impl)
-internal/service        — validation & business logic
-internal/handler        — HTTP handlers + logging middleware
+internal/features/
+  readings/            — reading model, validation, storage, HTTP, MQTT
+internal/platform/
+  database/            — shared MySQL connection setup
+  httpmiddleware/      — shared HTTP middleware
+  realtime/            — shared WebSocket hub
 migrations/             — raw SQL schema files
 ```
 
-Each layer only depends on the layer directly below it. The repository layer
-is defined as an interface so the service layer never depends on MySQL
-directly — this matters for testing and for future extensibility (e.g. this
-is also the reason it'll be easy to add MQTT ingestion later, since MQTT
-messages will flow through this same service layer).
+Feature code is grouped vertically. A feature owns its model, business rules,
+storage, and transport adapters; shared infrastructure stays under
+`internal/platform`.
 
 ## API Reference
 

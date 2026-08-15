@@ -1,4 +1,4 @@
-package repository
+package database
 
 import (
 	"fmt"
@@ -11,7 +11,7 @@ import (
 func NewDB(dsn string) (*sqlx.DB, error) {
 	db, err := sqlx.Connect("mysql", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("repository: failed to connect to db: %w", err)
+		return nil, fmt.Errorf("database: failed to connect to db: %w", err)
 	}
 
 	db.SetMaxOpenConns(10)

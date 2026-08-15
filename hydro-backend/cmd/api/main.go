@@ -9,11 +9,10 @@ import (
 	"time"
 
 	"hydro-backend/internal/config"
-	"hydro-backend/internal/handler"
-	"hydro-backend/internal/mqtt"
-	"hydro-backend/internal/repository"
-	"hydro-backend/internal/service"
-	"hydro-backend/internal/websocket"
+	"hydro-backend/internal/features/readings"
+	"hydro-backend/internal/platform/database"
+	"hydro-backend/internal/platform/httpmiddleware"
+	"hydro-backend/internal/platform/realtime"
 )
 
 func main() {
@@ -22,7 +21,7 @@ func main() {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
-	db, err := repository.NewDB(cfg.DB.DSN())
+	db, err := database.NewDB(cfg.DB.DSN())
 	if err != nil {
 		log.Fatalf("failed to connect to database: %v", err)
 	}
@@ -30,22 +29,14 @@ func main() {
 
 	log.Println("✅ connected to MySQL successfully")
 
-	readingRepo := repository.NewMySQLReadingRepository(db)
-	readingService := service.NewReadingService(readingRepo)
-	readingHandler := handler.NewReadingHandler(readingService)
+	readingRepo := readings.NewMySQLRepository(db)
+	readingService := readings.NewService(readingRepo)
+	readingHandler := readings.NewHTTPHandler(readingService)
 
-	// WebSocket hub — created once, shared by the /ws route (which
-	// registers new client connections) and the reading service (which
-	// broadcasts to those clients after every successful insert,
-	// regardless of whether the reading came from HTTP or MQTT).
-	hub := websocket.NewHub()
+	hub := realtime.NewHub()
 	readingService.SetBroadcaster(hub)
 
-	// MQTT subscriber shares the exact same readingService instance as the
-	// HTTP handler above — this is the whole point of the layered
-	// architecture. Whether a reading arrives via HTTP POST or MQTT
-	// publish, it goes through identical validation and storage logic.
-	subscriber := mqtt.NewSubscriber(cfg.MQTT.BrokerURL, readingService)
+	subscriber := readings.NewMQTTSubscriber(cfg.MQTT.BrokerURL, readingService)
 	if err := subscriber.Start(); err != nil {
 		log.Fatalf("failed to start MQTT subscriber: %v", err)
 	}
@@ -55,25 +46,18 @@ func main() {
 	mux.HandleFunc("POST /readings", readingHandler.CreateReading)
 	mux.HandleFunc("GET /readings", readingHandler.GetHistory)
 	mux.HandleFunc("GET /readings/latest", readingHandler.GetLatest)
-	mux.HandleFunc("GET /ws", websocket.Handler(hub))
+	mux.HandleFunc("GET /ws", realtime.Handler(hub))
 
-	loggedMux := handler.Logger(mux)
+	loggedMux := httpmiddleware.Logger(mux)
 
 	srv := &http.Server{
 		Addr:    ":" + cfg.Server.Port,
 		Handler: loggedMux,
 	}
 
-	// signal.NotifyContext gives us a context that's automatically
-	// cancelled when the OS sends SIGINT (Ctrl+C) or SIGTERM (what
-	// Docker/systemd send when stopping a service). This is the standard
-	// Go pattern for graceful shutdown — everything downstream that
-	// accepts a context (like our DB calls) can react to this same signal.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Run the server in a background goroutine so main() can keep going
-	// and block on waiting for the shutdown signal instead.
 	go func() {
 		log.Printf("🚀 server listening on %s", srv.Addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -81,12 +65,9 @@ func main() {
 		}
 	}()
 
-	// Block here until Ctrl+C / SIGTERM arrives.
 	<-ctx.Done()
 	log.Println("🛑 shutdown signal received, draining in-flight requests...")
 
-	// Give in-flight requests up to 10 seconds to finish before forcing
-	// shutdown — this prevents cutting off a request mid-DB-write.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
