@@ -9,7 +9,7 @@ import { SENSOR_CONFIGS } from './utils/sensors'
 import { formatDateTime, timeAgo } from './utils/time'
 
 function App() {
-  const [deviceId, setDeviceId] = useState('esp32-tank-01')
+  const [deviceId, setDeviceId] = useState('esp32-hydro-01')
   const { history, latest, loading, error, connectionState, refresh, stats } = useTelemetry(deviceId)
 
   return (
