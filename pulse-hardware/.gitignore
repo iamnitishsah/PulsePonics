@@ -1,0 +1,5 @@
+.pio/
+.idea/
+include/secrets.h
+
+.DS_Store
