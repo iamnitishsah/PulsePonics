@@ -54,20 +54,55 @@ GND ──────────────── Black
 
 ---
 
+Full pin map, I²C addresses and wiring for every sensor: **[docs/wiring.md](docs/wiring.md)**.
+
+---
+
 ## 2. Project layout
 
 ```
 pulse-hardware/
+├── platformio.ini                 # ESP32 build + native unit-test environment, pinned libraries
+├── .gitignore
 ├── README.md
-├── platformio.ini
 ├── include/
-│   ├── secrets.h            # Wi-Fi + broker settings (gitignored, never commit)
-│   └── secrets.example.h    # template for secrets.h
+│   ├── config.h                   # device ID, timing, pins, I2C addresses, backend ranges
+│   ├── calibration.h              # pH / EC calibration constants
+│   ├── secrets.example.h          # template → copy to secrets.h
+│   └── secrets.h                  # Wi-Fi + broker (gitignored, never commit)
 ├── src/
-│   └── main.cpp             # firmware
+│   ├── main.cpp                   # setup() + loop() only: orchestration
+│   ├── diag/
+│   │   └── diagnostics.h/.cpp     # boot info, reset reason, I2C scan (BME280 vs BMP280)
+│   ├── net/
+│   │   ├── wifi_link.h/.cpp       # Wi-Fi connect / reconnect
+│   │   ├── ntp_clock.h/.cpp       # NTP time, RFC3339 formatting
+│   │   └── mqtt_link.h/.cpp       # MQTT connect, LWT, QoS 1 publish, retry slot
+│   ├── sensors/
+│   │   ├── water_temp.h/.cpp      # DS18B20                       ✅ working
+│   │   ├── air.h/.cpp             # BME280                        ⏳ stub (Checkpoint 7)
+│   │   ├── adc.h/.cpp             # ADS1115                       ⏳ stub (Checkpoint 8)
+│   │   └── probes.h/.cpp          # pH + EC via ADS1115           ⏳ math ready, needs adc + calibration
+│   └── telemetry/
+│       ├── readings.h             # SensorReadings struct (NAN = no value)
+│       └── payload.h/.cpp         # JSON in the backend's POST /readings format
 ├── lib/
-└── test/
+│   └── hydro_math/
+│       └── hydro_math.h           # pure pH/EC/range math (no Arduino) → unit-testable
+├── test/
+│   └── test_hydro_math/
+│       └── test_main.cpp          # unit tests, run on the Mac
+└── docs/
+    ├── wiring.md                  # pin map + per-sensor wiring
+    └── calibration-log.csv        # record every calibration (report evidence)
 ```
+
+### Design rules
+- **One module per sensor.** Each exposes `begin()` and a read function that returns `NAN` for "no valid value". Adding a sensor never touches the network code.
+- **`telemetry/payload` owns the backend contract.** Field names, validation ranges and rounding are in one place. Out-of-range values become `null` there.
+- **Hardware-free math lives in `lib/hydro_math`**, so calibration logic is unit-tested without an ESP32.
+- **Uncalibrated probes send `null`.** pH/EC stay `null` until `PH_CALIBRATED` / `EC_CALIBRATED` are set in `calibration.h`.
+- **Settings are not hardcoded in modules.** Pins and timings go in `config.h`, calibration in `calibration.h`, credentials in `secrets.h`.
 
 ---
 
@@ -78,19 +113,9 @@ pulse-hardware/
 - **CLion** with the bundled *PlatformIO for CLion* plugin. Open the folder containing `platformio.ini` as the project root.
 
 ### `platformio.ini`
-
-```ini
-[env:esp32dev]
-platform = espressif32
-board = esp32dev
-framework = arduino
-monitor_speed = 115200
-lib_deps =
-    paulstoffregen/OneWire
-    milesburton/DallasTemperature
-    256dpi/MQTT
-    bblanchon/ArduinoJson
-```
+Two environments:
+- **`esp32dev`** (default) builds the firmware. All sensor libraries are pinned, including the BME280 and ADS1X15 libraries needed for the next checkpoints.
+- **`native`** runs the unit tests on the Mac. Keep **`esp32dev`** selected in CLion's environment dropdown for normal work.
 
 ### Secrets
 Copy `include/secrets.example.h` to `include/secrets.h` and fill it in:
@@ -107,7 +132,7 @@ Copy `include/secrets.example.h` to `include/secrets.h` and fill it in:
 - `.gitignore` must contain `.pio/`, `.idea/` and `include/secrets.h`.
 
 ### Device ID
-`DEVICE_ID` in `src/main.cpp` (default `esp32-hydro-01`) sets the MQTT topic and the `device_id` field. **The dashboard only shows the device it is configured for**, so make sure the frontend's selected device matches.
+`DEVICE_ID` in `include/config.h` (default `esp32-hydro-01`) sets the MQTT topic and the `device_id` field. **The dashboard only shows the device it is configured for**, so make sure the frontend's selected device matches.
 
 ### Build, upload, monitor
 In CLion's PlatformIO panel, use **Upload and Monitor**, or from the terminal:
@@ -117,6 +142,13 @@ pio run -t upload
 pio device monitor
 ```
 
+### Unit tests (no ESP32 needed)
+```bash
+pio test -e native
+```
+Tests the pH/EC conversion, temperature compensation and range checks in `lib/hydro_math`. Run them after every change to the calibration math.
+
+### Upload tips
 - If upload hangs at `Connecting....`, hold the **BOOT** button.
 - `Could not exclusively lock port` means another serial monitor already holds the USB port. Stop it (■ / `Ctrl+C`) first.
 
@@ -173,9 +205,10 @@ Identical to the backend's `POST /readings` body:
 
 | Stage | Behaviour |
 |---|---|
-| Boot | Prints `Reset reason` (1 = power-on, 9 = brownout) for power diagnostics |
+| Boot | Prints firmware version, device ID and `Reset reason` (9 = brownout), then an I²C scan |
 | Wi-Fi | Connects with a 20 s timeout; TX power reduced to 8.5 dBm to lower peak current |
-| Time | NTP (`pool.ntp.org`, `time.google.com`), UTC, 30 s initial wait, keeps syncing in background |
+| Time | NTP (`pool.ntp.org`, `time.google.com`), UTC. Sync starts at boot even if Wi-Fi is down, waits 30 s, then continues in the background |
+| Sensors | Water temp is read first; pH/EC use it for temperature compensation |
 | MQTT connect | Registers LWT, publishes retained `online`; retries every 5 s if the broker is down |
 | Publish loop | Non-blocking `millis()` timer (10 s in development); `mqtt.loop()` keeps the connection alive |
 | PUBACK timeout | 5 s. A failed reading is kept in a one-slot buffer and re-sent after reconnecting, with its original `recorded_at` |

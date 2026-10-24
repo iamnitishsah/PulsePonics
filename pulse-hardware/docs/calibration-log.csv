@@ -1,0 +1,2 @@
+date,time_ist,sensor,solution,nominal_value,unit,measured_mv,reading_after_cal,water_temp_c,notes
+2026-10-24,12:25,ds18b20,ice bath,0.00,degC,,,,example row: replace with your measurement

@@ -1,5 +1,14 @@
+# PlatformIO build output and downloaded libraries
 .pio/
+
+# IDE
 .idea/
+.vscode/
+cmake-build-*/
+CMakeListsPrivate.txt
+
+# Secrets: Wi-Fi password and broker address (template: include/secrets.example.h)
 include/secrets.h
 
+# macOS
 .DS_Store

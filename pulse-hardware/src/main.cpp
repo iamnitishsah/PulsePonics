@@ -1,183 +1,99 @@
+// PulsePonics ESP32 firmware: reads the hydroponic sensors and publishes
+// telemetry to the backend over MQTT.
+//
+// main.cpp only orchestrates. The real work lives in:
+//   net/        Wi-Fi, NTP clock, MQTT
+//   sensors/    one module per sensor (DS18B20, BME280, ADS1115, pH/EC probes)
+//   telemetry/  JSON payload in the backend's format
+//   diag/       boot diagnostics
+// Settings: include/config.h   Calibration: include/calibration.h   Secrets: include/secrets.h
+
 #include <Arduino.h>
-#include <WiFi.h>
-#include <MQTT.h>
-#include <ArduinoJson.h>
-#include <OneWire.h>
-#include <DallasTemperature.h>
-#include <esp_system.h>
-#include <time.h>
-#include "secrets.h"
+#include <Wire.h>
 
-// ---------- Config ----------
-// DEVICE_ID must match the device the dashboard is set to show.
-constexpr char     DEVICE_ID[]         = "esp32-hydro-01";
-constexpr int      ONE_WIRE_PIN        = 4;
-constexpr uint32_t PUBLISH_INTERVAL_MS = 10000;      // 10 s for development; use 60000 in deployment
-constexpr time_t   VALID_TIME_AFTER    = 1700000000; // before Nov 2023 = clock not synced
-constexpr int      MQTT_TIMEOUT_MS     = 5000;       // wait up to 5 s for PUBACK over the hotspot
+#include "config.h"
+#include "diag/diagnostics.h"
+#include "net/mqtt_link.h"
+#include "net/ntp_clock.h"
+#include "net/wifi_link.h"
+#include "sensors/air.h"
+#include "sensors/probes.h"
+#include "sensors/water_temp.h"
+#include "telemetry/payload.h"
+#include "telemetry/readings.h"
 
-// Backend validation ranges (pulse-backend API_DOCUMENTATION.md).
-// A value outside these makes the backend reject the WHOLE reading,
-// so out-of-range values are sent as null instead.
-constexpr float WATER_TEMP_MIN_C = -10.0f;
-constexpr float WATER_TEMP_MAX_C =  60.0f;
+namespace {
 
-const String TOPIC_TELEMETRY = String("hydroponics/") + DEVICE_ID + "/telemetry";
-const String TOPIC_STATUS    = String("hydroponics/") + DEVICE_ID + "/status";
+uint32_t lastPublishMs = 0;
 
-WiFiClient net;
-MQTTClient mqtt(512);                 // 512-byte buffer: topic + JSON fit comfortably
-OneWire oneWire(ONE_WIRE_PIN);
-DallasTemperature sensors(&oneWire);
-uint32_t lastPublish = 0;
+SensorReadings readSensors() {
+  SensorReadings r;
 
-// One-slot retry buffer: a reading whose PUBACK never arrived.
-// It keeps its original recorded_at. If a second reading fails before
-// this one is re-sent, the newer one replaces it.
-char   pendingPayload[384];
-size_t pendingLen = 0;                // > 0 means one reading is waiting to be re-sent
+  r.waterTempC = water_temp::readC();          // read first: pH/EC need it for compensation
 
-// ---------- Helpers ----------
-float round2(float v) { return roundf(v * 100.0f) / 100.0f; }   // matches DB DECIMAL(x,2)
+  const air::Sample a = air::read();
+  r.airTempC    = a.tempC;
+  r.humidityPct = a.humidityPct;
+  r.pressureHpa = a.pressureHpa;
 
-// RFC3339 in UTC, e.g. "2026-10-24T08:20:00Z" (what Go's time.Time JSON decoder expects)
-void formatRFC3339(time_t t, char *out, size_t len) {
-  struct tm tmUtc;
-  gmtime_r(&t, &tmUtc);
-  strftime(out, len, "%Y-%m-%dT%H:%M:%SZ", &tmUtc);
+  const probes::Sample p = probes::read(r.waterTempC);
+  r.ph     = p.ph;
+  r.ecMsCm = p.ecMsCm;
+
+  return r;
 }
 
-// ---------- Wi-Fi + time ----------
-void connectWiFi() {
-  WiFi.mode(WIFI_STA);
-  WiFi.setTxPower(WIFI_POWER_8_5dBm); // lower peak current; signal is strong anyway
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.printf("Connecting to %s", WIFI_SSID);
-  uint32_t start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) {
-    delay(500);
-    Serial.print(".");
-  }
-  if (WiFi.status() == WL_CONNECTED)
-    Serial.printf("\nWi-Fi OK | IP: %s | RSSI: %d dBm\n",
-                  WiFi.localIP().toString().c_str(), WiFi.RSSI());
-  else
-    Serial.printf("\nWi-Fi FAILED (status %d)\n", WiFi.status());
-}
-
-bool timeIsValid() { return time(nullptr) > VALID_TIME_AFTER; }
-
-void syncTime() {
-  configTime(0, 0, "pool.ntp.org", "time.google.com");  // UTC, no offset
-  Serial.print("Syncing time");
-  uint32_t start = millis();
-  while (!timeIsValid() && millis() - start < 30000) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println(timeIsValid() ? "\nTime OK" : "\nTime sync pending (will keep trying)");
-}
-
-// ---------- MQTT ----------
-bool connectMQTT() {
-  Serial.printf("MQTT connecting to %s:%d ... ", MQTT_HOST, MQTT_PORT);
-  mqtt.setWill(TOPIC_STATUS.c_str(), "offline", true, 1);   // LWT: retained, QoS 1
-  if (!mqtt.connect(DEVICE_ID)) {
-    Serial.printf("FAILED (err %d, rc %d)\n", (int)mqtt.lastError(), (int)mqtt.returnCode());
-    return false;
-  }
-  mqtt.publish(TOPIC_STATUS.c_str(), "online", true, 1);    // retained "online"
-  Serial.println("OK");
-  return true;
-}
-
-// Payload matches pulse-backend's POST /readings shape (API_DOCUMENTATION.md):
-// device_id, ph, ec_ms_cm, water_temp_c, air_temp_c, humidity_pct, pressure_hpa, recorded_at
-void publishTelemetry() {
-  sensors.requestTemperatures();
-  float t = sensors.getTempCByIndex(0);
-  time_t now = time(nullptr);
-
-  bool waterTempOk = !(t == DEVICE_DISCONNECTED_C ||   // -127: probe disconnected
-                       t == 85.0f ||                    // power-on reset value
-                       t < WATER_TEMP_MIN_C || t > WATER_TEMP_MAX_C);
-
-  char recordedAt[25];
-  formatRFC3339(now, recordedAt, sizeof(recordedAt));
-
-  JsonDocument doc;
-  bool hasValue = false;                 // backend rejects readings with no sensor value
-
-  doc["device_id"] = DEVICE_ID;
-  doc["ph"]        = nullptr;            // ADS1115 + pH probe: not wired yet
-  doc["ec_ms_cm"]  = nullptr;            // ADS1115 + EC probe: not wired yet
-  if (waterTempOk) { doc["water_temp_c"] = round2(t); hasValue = true; }
-  else             { doc["water_temp_c"] = nullptr; }
-  doc["air_temp_c"]   = nullptr;         // BME280: not wired yet
-  doc["humidity_pct"] = nullptr;         // BME280: not wired yet
-  doc["pressure_hpa"] = nullptr;         // BME280: not wired yet
-  doc["recorded_at"]  = recordedAt;
-
-  if (!hasValue) {
-    Serial.printf("No valid sensor values (water_temp raw = %.2f), publish skipped\n", t);
+void publishCycle() {
+  if (!ntp_clock::valid()) {
+    Serial.println("No valid time yet, publish skipped");
     return;
   }
 
-  char payload[384];
-  size_t n = serializeJson(doc, payload, sizeof(payload));
-  bool ok = mqtt.publish(TOPIC_TELEMETRY.c_str(), payload, n, false, 1);  // QoS 1
+  const SensorReadings r = readSensors();
 
-  if (ok) {
-    Serial.printf("Published (%u bytes): %s\n", (unsigned)n, payload);
-  } else {
-    memcpy(pendingPayload, payload, n);
-    pendingLen = n;
-    Serial.printf("PUBLISH FAILED, queued for retry: %s\n", payload);
+  char payload[PAYLOAD_MAX_BYTES];
+  const size_t n = telemetry::buildPayload(r, ntp_clock::now(), payload, sizeof(payload));
+  if (n == 0) {
+    Serial.println("No valid sensor values, publish skipped");
+    return;
   }
+  mqtt_link::publishTelemetry(payload, n);
 }
 
-void retryPending() {
-  if (pendingLen == 0) return;
-  if (mqtt.publish(TOPIC_TELEMETRY.c_str(), pendingPayload, pendingLen, false, 1)) {
-    Serial.println("Retried OK");
-    pendingLen = 0;
-  }
-}
+}  // namespace
 
-// ---------- Main ----------
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.printf("\nReset reason: %d\n", (int)esp_reset_reason());
+  diag::printBootInfo();
 
-  sensors.begin();
-  sensors.setResolution(12);
+  Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
+  diag::scanI2C();
 
-  connectWiFi();
-  if (WiFi.status() == WL_CONNECTED) syncTime();
+  water_temp::begin();
+  air::begin();
+  probes::begin();
 
-  mqtt.begin(MQTT_HOST, MQTT_PORT, net);
-  mqtt.setTimeout(MQTT_TIMEOUT_MS);
-  connectMQTT();
+  ntp_clock::begin();                 // starts background sync even if Wi-Fi is down
+  wifi_link::connect();
+  if (wifi_link::connected()) ntp_clock::waitForSync();
+
+  mqtt_link::begin();
+  mqtt_link::ensureConnected();
 }
 
 void loop() {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("Wi-Fi lost, reconnecting...");
-    connectWiFi();
-    return;
-  }
-  if (!mqtt.connected() && !connectMQTT()) {
-    delay(5000);                       // broker down: retry every 5 s
-    return;
-  }
-  mqtt.loop();                         // keeps the connection alive
-  retryPending();                      // re-send a reading whose PUBACK timed out
+  if (!wifi_link::ensure()) return;
 
-  if (millis() - lastPublish >= PUBLISH_INTERVAL_MS) {
-    lastPublish = millis();
-    if (timeIsValid()) publishTelemetry();
-    else Serial.println("No valid time yet, publish skipped");
+  if (!mqtt_link::ensureConnected()) {
+    delay(MQTT_RETRY_DELAY_MS);       // broker unreachable: retry later
+    return;
+  }
+  mqtt_link::loop();                  // keep-alive + re-send a reading whose PUBACK timed out
+
+  if (millis() - lastPublishMs >= PUBLISH_INTERVAL_MS) {
+    lastPublishMs = millis();
+    publishCycle();
   }
   delay(10);
 }
