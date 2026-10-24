@@ -1,18 +1,38 @@
 #include <Arduino.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
 
-const int LED_PIN = 2;   // onboard LED on most ESP32 DevKit boards
+constexpr int ONE_WIRE_PIN = 4;
+
+OneWire oneWire(ONE_WIRE_PIN);
+DallasTemperature sensors(&oneWire);
 
 void setup() {
     Serial.begin(115200);
-    pinMode(LED_PIN, OUTPUT);
-    Serial.println("ESP32 is alive!");
+    delay(500);
+
+    sensors.begin();
+    Serial.printf("DS18B20 devices found: %d\n", sensors.getDeviceCount());
+
+    DeviceAddress addr;
+    if (sensors.getAddress(addr, 0)) {
+        Serial.print("Address: ");
+        for (uint8_t i = 0; i < 8; i++) Serial.printf("%02X", addr[i]);
+        Serial.println();
+    }
+    sensors.setResolution(12);
 }
 
 void loop() {
-    digitalWrite(LED_PIN, HIGH);
-    Serial.println("LED ON");
-    delay(1000);
-    digitalWrite(LED_PIN, LOW);
-    Serial.println("LED OFF");
-    delay(1000);
+    sensors.requestTemperatures();
+    float t = sensors.getTempCByIndex(0);
+
+    if (t == DEVICE_DISCONNECTED_C) {
+        Serial.println("water_temp: null  (fault: disconnected)");
+    } else if (t == 85.0f) {
+        Serial.println("water_temp: null  (fault: reset value)");
+    } else {
+        Serial.printf("water_temp: %.2f C\n", t);
+    }
+    delay(2000);
 }
