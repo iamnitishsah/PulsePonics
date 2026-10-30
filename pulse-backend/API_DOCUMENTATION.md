@@ -1,440 +1,230 @@
-# PulsePonics Backend API Documentation
+# PulsePonics API
 
-PulsePonics backend is a Go HTTP API for storing hydroponics telemetry, reading recent sensor history, and pushing new readings to connected dashboards in real time.
+Base URL: `http://localhost:8080` locally, `https://<API_DOMAIN>` on EC2. Every route is under `/api`.
 
-## Base URL
-
-Local development:
-
-```text
-http://localhost:8080
-```
-
-The server port is configured with `SERVER_PORT`. If unset, it defaults to `8080`.
-
-## Content Type
-
-REST endpoints consume and return JSON.
-
-```http
-Content-Type: application/json
-Accept: application/json
-```
-
-## Data Model
-
-### Reading
-
-```json
-{
-  "id": 1,
-  "device_id": "esp32-tank-01",
-  "ph": 6.25,
-  "ec_ms_cm": 1.82,
-  "water_temp_c": 22.4,
-  "air_temp_c": 26.1,
-  "humidity_pct": 58.5,
-  "pressure_hpa": 1012.4,
-  "recorded_at": "2026-08-16T03:20:00+05:30",
-  "created_at": "2026-08-16T03:20:00+05:30"
-}
-```
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `id` | integer | Response only | Database primary key. |
-| `device_id` | string | Yes | Device identifier, for example `esp32-tank-01`. |
-| `ph` | number or null | No | Nutrient solution pH. Valid range: `0` to `14`. |
-| `ec_ms_cm` | number or null | No | Electrical conductivity in mS/cm. Must be `>= 0`. |
-| `water_temp_c` | number or null | No | Water temperature in Celsius. Valid range: `-10` to `60`. |
-| `air_temp_c` | number or null | No | Air temperature in Celsius. Valid range: `-20` to `60`. |
-| `humidity_pct` | number or null | No | Relative humidity percentage. Valid range: `0` to `100`. |
-| `pressure_hpa` | number or null | No | Atmospheric pressure in hPa. No validation range is currently enforced. |
-| `recorded_at` | RFC3339 string | No on create | Time the device captured the reading. Defaults to server time when omitted or zero. |
-| `created_at` | RFC3339 string | Response only | Time the backend stored the reading. |
-
-At least one sensor value must be provided when creating a reading.
-
-## Error Format
-
-All HTTP errors return this shape:
-
-```json
-{
-  "error": "device_id is required"
-}
-```
-
-Common status codes:
+- Bodies are JSON. Times are RFC 3339 in UTC (`2026-10-24T08:20:00Z`).
+- **User routes** need `Authorization: Bearer <access_token>`.
+- **Device ingestion** needs `X-Device-Key: <device api key>`.
+- Errors are returned as `{"error": "message", "field": "optional_field"}` with one of these status codes:
 
 | Status | Meaning |
-| --- | --- |
-| `400 Bad Request` | Invalid JSON, missing `device_id`, missing sensor data, or failed validation. |
-| `404 Not Found` | No latest reading exists for the requested device. |
-| `500 Internal Server Error` | Database or unexpected server failure. |
+|---|---|
+| 400 | Invalid input (`field` names the offending field when there is one) |
+| 401 | Missing, invalid or expired credentials |
+| 403 | Authenticated, but not allowed (e.g. `device_id` doesn't match the key) |
+| 404 | Not found, or belongs to another user |
+| 409 | Conflict (email taken, device already registered, duplicate reading) |
+| 429 | Too many auth attempts (about 10 per minute per IP) |
+| 500 | Server error (details only in server logs) |
 
-## REST Endpoints
+---
 
-### Create Reading
+## Health
 
-Stores a new telemetry reading.
+### `GET /api/healthz`
+Returns `{"status":"ok"}`, or 503 if the database is unreachable.
 
-```http
-POST /readings
-```
+### `GET /api/metrics`
+The six sensor fields with label, unit and accepted range. Public.
 
-#### Request Body
+---
 
-```json
-{
-  "device_id": "esp32-tank-01",
-  "ph": 6.2,
-  "ec_ms_cm": 1.8,
-  "water_temp_c": 22.5,
-  "air_temp_c": 26.1,
-  "humidity_pct": 55.0,
-  "pressure_hpa": 1012.5,
-  "recorded_at": "2026-08-16T03:20:00+05:30"
-}
-```
+## Auth
 
-`recorded_at` may be omitted:
+A **session** response (signup, login, refresh, password change):
 
 ```json
 {
-  "device_id": "esp32-tank-01",
-  "ph": 6.2,
-  "ec_ms_cm": 1.8
+  "access_token": "eyJhbGciOi...",
+  "access_token_expires_at": "2026-10-30T09:36:00Z",
+  "refresh_token": "q3J...",
+  "refresh_token_expires_at": "2026-11-06T09:21:00Z",
+  "user": { "id": 1, "email": "grower@example.com", "name": "Grower", "created_at": "2026-10-30T09:21:00Z" }
 }
 ```
 
-#### Success Response
+Access tokens last 15 minutes. Exchange the refresh token for a new pair with `/api/auth/refresh`. Each refresh token works **once**: reusing a rotated token revokes every session of that user.
 
-```http
-201 Created
-```
+| Method & path | Auth | Body | Success |
+|---|---|---|---|
+| `POST /api/auth/signup` | none | `{email, password, name?}`: password at least 8 characters; name defaults to the part of the email before `@` | 201 session |
+| `POST /api/auth/login` | none | `{email, password}` | 200 session |
+| `POST /api/auth/refresh` | none | `{refresh_token}` | 200 session |
+| `POST /api/auth/logout` | none | `{refresh_token}` | 204 |
+| `GET /api/me` | user | none | 200 user |
+| `POST /api/me/password` | user | `{current_password, new_password}` | 200 session (other sessions revoked) |
+| `DELETE /api/me` | user | `{password}` | 204 (devices and data deleted) |
+
+---
+
+## Devices
+
+`device_id` is the firmware's `DEVICE_ID`: 3–64 characters from `A–Z a–z 0–9 - _`. It is globally unique, so one device belongs to one user. Telemetry for unregistered IDs is ignored.
 
 ```json
 {
-  "id": 1
+  "device_id": "esp32-hydro-01",
+  "name": "Lettuce tank",
+  "api_key_prefix": "ppk_Ab12Cd",
+  "created_at": "2026-10-30T09:22:00Z",
+  "latest": { "...reading...": "or null" },
+  "open_alerts": 1
 }
 ```
 
-#### Validation Errors
+| Method & path | Body | Success |
+|---|---|---|
+| `GET /api/devices` | none | 200 list (with `latest`, `open_alerts`) |
+| `POST /api/devices` | `{device_id, name?}` | 201 device + `api_key` (**shown once**) · 409 if already registered |
+| `GET /api/devices/{deviceID}` | none | 200 device |
+| `PATCH /api/devices/{deviceID}` | `{name}` | 200 device |
+| `DELETE /api/devices/{deviceID}` | none | 204 (readings, thresholds, alerts deleted) |
+| `POST /api/devices/{deviceID}/api-key` | none | 200 device + new `api_key` (old key stops working) |
 
-```http
-400 Bad Request
-```
+All of these require a user token.
 
-Examples:
+---
+
+## Readings
+
+### Ingest over MQTT (the ESP32)
+
+Topic `hydroponics/{device_id}/telemetry`, QoS 1, using the broker's device login. The payload is the one defined in `pulse-hardware/README.md`:
 
 ```json
 {
-  "error": "device_id is required"
+  "device_id": "esp32-hydro-01",
+  "ph": null, "ec_ms_cm": null, "water_temp_c": 28.44,
+  "air_temp_c": null, "humidity_pct": null, "pressure_hpa": null,
+  "recorded_at": "2026-10-24T08:20:00Z"
 }
 ```
 
-```json
-{
-  "error": "at least one sensor value must be provided"
-}
-```
+- At least one sensor value must be non-null.
+- `recorded_at` defaults to the server time if omitted. More than 5 minutes in the future is rejected.
+- The payload `device_id` must match the topic.
+- A second reading with the same `device_id` + `recorded_at` is ignored.
+- Rejected messages are logged by the backend, since MQTT has no response channel.
 
-```json
-{
-  "error": "ph must be between 0 and 14"
-}
-```
+| Field | Accepted range |
+|---|---|
+| `ph` | 0–14 |
+| `ec_ms_cm` | 0–20 mS/cm |
+| `water_temp_c` | −10–60 °C |
+| `air_temp_c` | −20–60 °C |
+| `humidity_pct` | 0–100 % |
+| `pressure_hpa` | 300–1100 hPa |
 
-#### curl Example
+### `POST /api/readings`
+
+Same payload, authenticated with `X-Device-Key`. `device_id` may be omitted (it's taken from the key); if present it must match. Returns 201 with the stored reading, or 409 for a duplicate.
 
 ```bash
-curl -X POST http://localhost:8080/readings \
-  -H "Content-Type: application/json" \
-  -d '{
-    "device_id": "esp32-tank-01",
-    "ph": 6.2,
-    "ec_ms_cm": 1.8,
-    "water_temp_c": 22.5,
-    "air_temp_c": 26.1,
-    "humidity_pct": 55,
-    "pressure_hpa": 1012.5
-  }'
+curl -X POST http://localhost:8080/api/readings \
+  -H "X-Device-Key: ppk_..." -H "Content-Type: application/json" \
+  -d '{"water_temp_c": 21.5, "ph": 6.1}'
 ```
 
-### Get Reading History
-
-Returns historical readings for one device.
-
-```http
-GET /readings
-```
-
-#### Query Parameters
-
-| Parameter | Type | Required | Default | Description |
-| --- | --- | --- | --- | --- |
-| `device_id` | string | Yes | None | Device ID to query. |
-| `from` | RFC3339 string | No | `to - 24h` | Start of the recorded-at time window. Invalid values are ignored. |
-| `to` | RFC3339 string | No | Server current time | End of the recorded-at time window. Invalid values are ignored. |
-| `limit` | integer | No | `100` | Max rows. Values `<= 0` or `> 1000` become `100`. |
-| `offset` | integer | No | `0` | Rows to skip. |
-
-Rows are returned by the database in descending `recorded_at` order.
-
-#### Success Response
-
-```http
-200 OK
-```
-
-```json
-[
-  {
-    "id": 12,
-    "device_id": "esp32-tank-01",
-    "ph": 6.21,
-    "ec_ms_cm": 1.79,
-    "water_temp_c": 22.6,
-    "air_temp_c": 26.4,
-    "humidity_pct": 56.1,
-    "pressure_hpa": 1012.2,
-    "recorded_at": "2026-08-16T03:25:00+05:30",
-    "created_at": "2026-08-16T03:25:01+05:30"
-  }
-]
-```
-
-If no rows match, the response is an empty array.
-
-#### curl Example
-
-```bash
-curl "http://localhost:8080/readings?device_id=esp32-tank-01&limit=100"
-```
-
-With an explicit time window:
-
-```bash
-curl "http://localhost:8080/readings?device_id=esp32-tank-01&from=2026-08-16T00:00:00%2B05:30&to=2026-08-16T23:59:59%2B05:30&limit=250"
-```
-
-### Get Latest Reading
-
-Returns the most recent reading for one device.
-
-```http
-GET /readings/latest
-```
-
-#### Query Parameters
-
-| Parameter | Type | Required | Description |
-| --- | --- | --- | --- |
-| `device_id` | string | Yes | Device ID to query. |
-
-#### Success Response
-
-```http
-200 OK
-```
+A stored reading looks like this:
 
 ```json
 {
-  "id": 12,
-  "device_id": "esp32-tank-01",
-  "ph": 6.21,
-  "ec_ms_cm": 1.79,
-  "water_temp_c": 22.6,
-  "air_temp_c": 26.4,
-  "humidity_pct": 56.1,
-  "pressure_hpa": 1012.2,
-  "recorded_at": "2026-08-16T03:25:00+05:30",
-  "created_at": "2026-08-16T03:25:01+05:30"
+  "id": 42, "device_id": "esp32-hydro-01",
+  "ph": 6.1, "ec_ms_cm": null, "water_temp_c": 21.5, "air_temp_c": null, "humidity_pct": null, "pressure_hpa": null,
+  "recorded_at": "2026-10-30T09:22:21Z", "created_at": "2026-10-30T09:22:21.361Z"
 }
 ```
 
-#### Not Found Response
+### `GET /api/devices/{deviceID}/readings`
 
-```http
-404 Not Found
-```
+Chart history. Query parameters:
+
+| Param | Default | Notes |
+|---|---|---|
+| `from` | `to` minus 24 h | RFC 3339 |
+| `to` | now | RFC 3339 |
+| `max_points` | 500 | 10–2000 |
+
+The range may be at most 31 days. If the range holds more readings than `max_points`, they are averaged into equal time buckets.
 
 ```json
 {
-  "error": "no readings found for this device"
+  "device_id": "esp32-hydro-01",
+  "from": "2026-10-30T08:22:00Z", "to": "2026-10-30T09:22:00Z",
+  "bucket_seconds": 0,
+  "points": [ { "recorded_at": "...", "ph": 6.1, "ec_ms_cm": null, "...": "..." } ]
 }
 ```
 
-#### curl Example
+`bucket_seconds: 0` means raw readings. Otherwise each point is the average of the bucket starting at `recorded_at`.
 
-```bash
-curl "http://localhost:8080/readings/latest?device_id=esp32-tank-01"
+### `GET /api/devices/{deviceID}/readings/latest`
+Returns the newest reading, or 404 if there is none yet.
+
+### `GET /api/devices/{deviceID}/readings/recent?limit=20`
+Returns the newest readings, newest first. `limit` can be at most 200.
+
+---
+
+## Thresholds and alerts
+
+### `GET /api/devices/{deviceID}/thresholds`
+Returns all six metrics, with defaults where the user hasn't saved a value:
+
+```json
+{ "thresholds": [
+  { "metric": "ph", "min": 5.5, "max": 6.5, "enabled": true },
+  { "metric": "ec_ms_cm", "min": 1.2, "max": 2.4, "enabled": true },
+  { "metric": "water_temp_c", "min": 18, "max": 24, "enabled": true },
+  { "metric": "air_temp_c", "min": 18, "max": 28, "enabled": true },
+  { "metric": "humidity_pct", "min": 45, "max": 75, "enabled": true },
+  { "metric": "pressure_hpa", "min": null, "max": null, "enabled": false }
+] }
 ```
 
-## WebSocket API
+### `PUT /api/devices/{deviceID}/thresholds`
+The body is `{"thresholds": [...]}` with any subset of metrics. Rules:
 
-### Subscribe to Live Readings
+- An enabled threshold needs `min`, `max`, or both.
+- `min` must be less than `max`.
+- Both bounds must lie inside the metric's accepted range.
 
-Opens a websocket connection that receives each newly stored reading.
+The latest reading is re-evaluated immediately, and disabling a metric resolves its open alert. Returns the full effective list.
 
-```text
-ws://localhost:8080/ws
-```
+### Alert lifecycle
 
-The server is push-only for application data. Clients do not need to send messages after connecting.
-
-#### Message Format
-
-Every websocket message is a JSON `Reading` object:
+- An alert **opens** when a reading falls below `min` (`kind: "low"`) or above `max` (`kind: "high"`).
+- While it is open, `latest_value` tracks each new reading.
+- It **resolves** once the value is back inside the band by 5 % of the band's width.
+- A `null` value for the metric leaves the alert as it is.
+- There is at most one open alert per device and metric.
 
 ```json
 {
-  "id": 13,
-  "device_id": "esp32-tank-01",
-  "ph": 6.23,
-  "ec_ms_cm": 1.81,
-  "water_temp_c": 22.7,
-  "air_temp_c": 26.5,
-  "humidity_pct": 56.4,
-  "pressure_hpa": 1012.1,
-  "recorded_at": "2026-08-16T03:26:00+05:30",
-  "created_at": "2026-08-16T03:26:01+05:30"
+  "id": 7, "device_id": "esp32-hydro-01", "metric": "ph", "kind": "high",
+  "threshold_value": 6.5, "trigger_value": 7.1, "latest_value": 6.9,
+  "opened_at": "2026-10-30T09:22:21Z", "resolved_at": null, "acknowledged_at": null,
+  "status": "open"
 }
 ```
 
-#### Browser Example
+### `GET /api/alerts?status=open|resolved|all&device_id=&limit=50`
+Returns the caller's alerts, open ones first, then newest first. `limit` can be at most 200.
 
-```js
-const socket = new WebSocket('ws://localhost:8080/ws')
+### `POST /api/alerts/{alertID}/acknowledge`
+Marks the alert as seen and returns the updated alert. The alert stays open until the value recovers.
 
-socket.onmessage = (event) => {
-  const reading = JSON.parse(event.data)
-  console.log(reading.device_id, reading.ph, reading.recorded_at)
-}
-```
+---
 
-#### Important Behavior
+## WebSocket
 
-- The websocket broadcasts readings submitted through `POST /readings`.
-- The websocket also broadcasts readings accepted from MQTT ingestion.
-- The websocket endpoint currently accepts all origins in development.
-- There is no per-device websocket filter; frontend clients should filter by `device_id`.
+`GET /api/ws?token=<access_token>` (`wss://` in production). Browsers can't send headers on WebSocket requests, which is why the token goes in the query string. It is checked once, at connect. The `Origin` must be in `CORS_ALLOWED_ORIGINS`.
 
-## MQTT Ingestion
-
-The backend subscribes to telemetry published by devices or simulators.
-
-### Broker
-
-Configured by `MQTT_BROKER_URL`.
-
-Default:
-
-```text
-tcp://localhost:1883
-```
-
-### Topic Pattern
-
-```text
-hydroponics/+/telemetry
-```
-
-The `+` segment allows multiple device-specific topics, for example:
-
-```text
-hydroponics/esp32-tank-01/telemetry
-hydroponics/esp32-tank-02/telemetry
-```
-
-### Payload
-
-The MQTT payload uses the same JSON shape as `POST /readings`.
+The server only sends events for the user's own devices:
 
 ```json
-{
-  "device_id": "esp32-tank-01",
-  "ph": 6.2,
-  "ec_ms_cm": 1.8,
-  "water_temp_c": 22.5,
-  "air_temp_c": 26.1,
-  "humidity_pct": 55.0,
-  "pressure_hpa": 1012.5,
-  "recorded_at": "2026-08-16T03:20:00+05:30"
-}
+{ "type": "reading", "data": { "...stored reading..." : "" } }
+{ "type": "alert",   "data": { "...alert, status open or resolved..." : "" } }
 ```
 
-Accepted MQTT readings are saved to MySQL and broadcast to websocket clients.
-
-## Validation Rules
-
-| Field | Rule | Error message |
-| --- | --- | --- |
-| `device_id` | Required | `device_id is required` |
-| Sensor values | At least one sensor field required | `at least one sensor value must be provided` |
-| `ph` | `0 <= ph <= 14` | `ph must be between 0 and 14` |
-| `ec_ms_cm` | `ec_ms_cm >= 0` | `ec_ms_cm cannot be negative` |
-| `water_temp_c` | `-10 <= water_temp_c <= 60` | `water_temp_c must be between -10 and 60` |
-| `air_temp_c` | `-20 <= air_temp_c <= 60` | `air_temp_c must be between -20 and 60` |
-| `humidity_pct` | `0 <= humidity_pct <= 100` | `humidity_pct must be between 0 and 100` |
-| `pressure_hpa` | No current validation rule | None |
-
-## Storage Notes
-
-Readings are stored in the `readings` table.
-
-Important columns:
-
-| Column | Type | Description |
-| --- | --- | --- |
-| `id` | `BIGINT UNSIGNED AUTO_INCREMENT` | Primary key. |
-| `device_id` | `VARCHAR(64)` | Device identifier. |
-| `ph` | `DECIMAL(4,2)` | Nullable pH value. |
-| `ec_ms_cm` | `DECIMAL(6,3)` | Nullable EC value. |
-| `water_temp_c` | `DECIMAL(5,2)` | Nullable water temperature. |
-| `air_temp_c` | `DECIMAL(5,2)` | Nullable air temperature. |
-| `humidity_pct` | `DECIMAL(5,2)` | Nullable humidity. |
-| `pressure_hpa` | `DECIMAL(7,2)` | Nullable pressure. |
-| `recorded_at` | `DATETIME(3)` | Device reading timestamp. |
-| `created_at` | `DATETIME(3)` | Server insertion timestamp. |
-
-The table has an index on `(device_id, recorded_at)` for dashboard history queries.
-
-## Environment Variables
-
-| Variable | Required | Default | Description |
-| --- | --- | --- | --- |
-| `DB_USER` | Yes | None | MySQL user. |
-| `DB_PASSWORD` | Yes | None | MySQL password. |
-| `DB_HOST` | No | `127.0.0.1` | MySQL host. |
-| `DB_PORT` | No | `3306` | MySQL port. |
-| `DB_NAME` | Yes | None | MySQL database name. |
-| `SERVER_PORT` | No | `8080` | HTTP server port. |
-| `MQTT_BROKER_URL` | No | `tcp://localhost:1883` | MQTT broker URL. |
-
-## Frontend Integration Notes
-
-For local Vite development, the frontend can proxy requests:
-
-```text
-/api/readings -> http://localhost:8080/readings
-/api/readings/latest -> http://localhost:8080/readings/latest
-/ws -> ws://localhost:8080/ws
-```
-
-Recommended frontend startup flow:
-
-1. Fetch `GET /readings?device_id=...&limit=100` for chart history.
-2. Fetch `GET /readings/latest?device_id=...` for the current snapshot.
-3. Connect to `GET /ws`.
-4. Filter websocket messages by `device_id`.
-5. Append matching websocket messages to the chart buffer.
-
-## Current Limitations
-
-- No authentication or authorization is implemented.
-- No production CORS/origin allowlist is implemented.
-- The websocket stream is global and not filtered by device server-side.
-- `from` and `to` query parameters silently fall back to defaults when invalid.
-- Alerting and biological safety thresholds are not implemented in the backend yet.
+The server pings every 54 seconds; clients that stop answering are dropped. After reconnecting, refetch the data, because events are not replayed.

@@ -1,244 +1,57 @@
-# PulsePonics Frontend
+# pulse-frontend
 
-The frontend is a React + TypeScript dashboard for monitoring hydroponics telemetry in real time.
+The PulsePonics dashboard: React 19, TypeScript, Vite, Tailwind CSS 4, React Router and Recharts.
 
-It uses Tailwind CSS for styling, fetches initial data from the backend REST API, and then listens for live readings over WebSocket.
+## Pages
 
-## Responsibilities
+| Route | What it shows |
+|---|---|
+| `/login`, `/signup` | Account access |
+| `/` | Your devices: live values, online/offline state, open alert count, and registration of new devices (the API key is shown once) |
+| `/devices/:deviceId` | Metric cards coloured by threshold state, a history chart (1H–30D, threshold band, outage gaps, min/avg/max), alerts with acknowledge, recent readings |
+| `/devices/:deviceId/settings` | Threshold editor, rename, API key rotation, delete |
+| `/account` | Profile, change password, sign out, delete account |
 
-- Let the user select a telemetry device ID.
-- Fetch recent reading history for the selected device.
-- Fetch the latest reading snapshot.
-- Subscribe to backend WebSocket updates.
-- Filter live readings by active `device_id`.
-- Render current sensor cards, a trend chart, a snapshot panel, and recent readings table.
-- Display backend connectivity and realtime connection state.
+Everything updates live over one WebSocket per tab. After a reconnect, pages refetch whatever they missed.
 
-## Tech Stack
-
-- React
-- TypeScript
-- Vite
-- Tailwind CSS
-- Native SVG for lightweight charts
-- Native browser WebSocket API
-
-No external charting library is currently used.
-
-## Directory Structure
-
-```text
-pulse-frontend/
-├── src/
-│   ├── api/
-│   │   └── readings.ts
-│   ├── components/
-│   │   ├── DeviceSelector.tsx
-│   │   ├── LineChart.tsx
-│   │   ├── ReadingTable.tsx
-│   │   ├── SensorCard.tsx
-│   │   ├── StatusPill.tsx
-│   │   └── TrendPanel.tsx
-│   ├── hooks/
-│   │   └── useTelemetry.ts
-│   ├── types/
-│   │   └── reading.ts
-│   ├── utils/
-│   │   ├── sensors.ts
-│   │   └── time.ts
-│   ├── App.tsx
-│   ├── index.css
-│   └── main.tsx
-├── index.html
-├── package.json
-├── vite.config.ts
-└── README.md
-```
-
-## Design Approach
-
-The interface is intentionally compact and operations-focused:
-
-- no landing page
-- no marketing hero section
-- no custom CSS design system
-- Tailwind utility classes only
-- dense sensor cards for quick scanning
-- a responsive chart area for trend inspection
-- a recent readings table for raw values
-
-`src/index.css` only imports Tailwind:
-
-```css
-@import "tailwindcss";
-```
-
-## Data Flow
-
-```text
-App
-  -> useTelemetry(deviceId)
-      -> GET /readings?device_id=...&limit=120
-      -> GET /readings/latest?device_id=...
-      -> WebSocket /ws
-      -> filter messages by device_id
-      -> merge realtime reading into history buffer
-```
-
-The backend returns historical rows in descending time order. The frontend sorts them ascending for chart rendering.
-
-## Backend Integration
-
-The Vite dev server proxies API calls to the Go backend:
-
-```text
-/api/readings         -> http://localhost:8080/readings
-/api/readings/latest  -> http://localhost:8080/readings/latest
-/ws                   -> ws://localhost:8080/ws
-```
-
-This keeps local development simple without requiring backend CORS changes.
-
-## Environment Variables
-
-Optional variables:
-
-```env
-VITE_API_BASE_URL=/api
-VITE_WS_URL=ws://localhost:8080/ws
-```
-
-Defaults:
-
-- `VITE_API_BASE_URL` defaults to `/api`
-- `VITE_WS_URL` defaults to the current host with `/ws`
-
-For normal local Vite development, no frontend `.env` file is required.
-
-## Install
+## Development
 
 ```bash
-cd pulse-frontend
 npm install
+npm run dev        # http://localhost:5173
 ```
 
-## Run Locally
-
-Start the backend first on `localhost:8080`, then:
+The dev server proxies `/api` (including the WebSocket) to `http://localhost:8080`, the Docker backend. Start it from the repo root with `docker compose up -d`. To point at another backend locally, set `VITE_PROXY_TARGET`.
 
 ```bash
-npm run dev
+npm run lint
+npm test           # vitest: metric state, formatting, chart gap detection
+npm run build      # type-check + production build into dist/
 ```
 
-Open the URL printed by Vite, usually:
+## Deploying to Vercel
+
+1. Import the repository and set **Root Directory** to `pulse-frontend`. The Vite preset is detected automatically.
+2. Add the environment variable `VITE_API_URL=https://<API_DOMAIN>` (the EC2 backend, no trailing slash).
+3. On the backend, add the Vercel URL to `CORS_ALLOWED_ORIGINS`, e.g. `https://pulseponics.vercel.app,https://pulseponics-*.vercel.app` for preview deployments.
+
+`vercel.json` rewrites every path to `index.html`, so deep links like `/devices/esp32-hydro-01` work on reload.
+
+## How auth works
+
+- The access token (15 min) is held in memory only. The refresh token is in `localStorage` (`src/lib/session.ts`), because the API is on another site and third-party cookies are unreliable.
+- `src/lib/api.ts` attaches the token, refreshes it when it is about to expire or a request returns 401, and retries the request once.
+- Refreshes are serialised across tabs with the Web Locks API. The backend rotates refresh tokens and treats reuse as theft, so two tabs must never refresh with the same token.
+- Signing out in one tab signs out the others.
+
+## Layout
 
 ```text
-http://localhost:5173
+src/
+  lib/          api client, session/token store, config, metric metadata, formatting, chart helpers
+  auth/         AuthProvider + useAuth
+  realtime/     RealtimeProvider (WebSocket with backoff) + useRealtimeEvents / useOnReconnect
+  hooks/        useQuery (abortable loads), useNow, useTitle
+  components/   layout, guards, cards, chart, alerts, tables, dialogs, ui/ primitives
+  pages/        one file per route
 ```
-
-The dashboard defaults to:
-
-```text
-esp32-tank-01
-```
-
-Change the device field if your backend has readings for another device.
-
-## Scripts
-
-| Command | Purpose |
-| --- | --- |
-| `npm run dev` | Start Vite dev server |
-| `npm run build` | Type-check and build production assets |
-| `npm run lint` | Run ESLint |
-| `npm run preview` | Preview the production build locally |
-
-## Component Notes
-
-### `useTelemetry`
-
-The main data hook. It:
-
-- loads history and latest reading
-- maintains loading and error state
-- opens a WebSocket connection
-- reconnects after disconnect
-- ignores readings from other devices
-- keeps a bounded chart buffer
-
-### `SensorCard`
-
-Displays the latest value for one sensor and a state label:
-
-- `Optimal`
-- `Low`
-- `High`
-- `Tracking`
-- `No data`
-
-The target ranges are frontend presentation ranges, not backend validation rules.
-
-### `LineChart`
-
-Renders a responsive SVG line chart for one selected sensor. It supports missing sensor values by filtering out non-numeric points.
-
-### `ReadingTable`
-
-Shows the most recent readings in reverse chronological order for quick inspection.
-
-## API Contract
-
-The frontend expects the backend `Reading` shape documented in:
-
-[../pulse-frontend/API_DOCUMENTATION.md](../pulse-frontend/API_DOCUMENTATION.md)
-
-Important fields:
-
-- `device_id`
-- `recorded_at`
-- `created_at`
-- `ph`
-- `ec_ms_cm`
-- `water_temp_c`
-- `air_temp_c`
-- `humidity_pct`
-- `pressure_hpa`
-
-## Troubleshooting
-
-### Dashboard says backend unavailable
-
-Check that the backend is running:
-
-```bash
-cd ../pulse-backend
-go run cmd/api/main.go
-```
-
-### WebSocket proxy shows `ECONNREFUSED`
-
-The frontend is running, but the backend is not listening on `localhost:8080`.
-
-### No chart data appears
-
-The selected device may not have enough numeric readings for the active chart sensor. Publish simulator data or switch the selected sensor tab.
-
-### New simulator data does not show
-
-Verify all three services are running:
-
-- MQTT broker
-- Go backend
-- hardware simulator
-
-Also verify the simulator device ID matches the frontend device field.
-
-## Production Notes
-
-Before deploying:
-
-- set explicit API and WebSocket URLs
-- configure backend CORS and WebSocket origin allowlists
-- add authentication
-- serve frontend assets through a production web server or hosting platform
-- add monitoring for backend and MQTT connectivity

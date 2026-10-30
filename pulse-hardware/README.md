@@ -6,7 +6,7 @@ ESP32 firmware for the **Automated Real-Time Hydroponics Telemetry and Alerting 
 DS18B20 ──1-Wire──▶ ESP32 ──Wi-Fi / MQTT──▶ Mosquitto ──▶ pulse-backend (Go) ──▶ MySQL ──▶ REST / WebSocket ──▶ pulse-frontend (React)
 ```
 
-The firmware publishes the **same JSON shape as the backend's `POST /readings`**, so the backend and frontend need no changes. See `../pulse-backend/API_DOCUMENTATION.md`.
+The firmware publishes the **same JSON shape as the backend's `POST /api/readings`**, so the backend and frontend need no changes. See `../pulse-backend/API_DOCUMENTATION.md`.
 
 ---
 
@@ -126,13 +126,17 @@ Copy `include/secrets.example.h` to `include/secrets.h` and fill it in:
 #define WIFI_PASSWORD "your-password"
 #define MQTT_HOST     "192.168.x.x"   // broker IP (your Mac on the same network, or EC2)
 #define MQTT_PORT     1883
+#define MQTT_USER     "pulse-device"  // MQTT_DEVICE_USERNAME from the repo's .env
+#define MQTT_PASSWORD "..."           // MQTT_DEVICE_PASSWORD from the repo's .env
 ```
+
+- The broker rejects anonymous clients. The firmware stops compiling with a clear `#error` if `MQTT_USER` / `MQTT_PASSWORD` are missing.
 
 - The ESP32 supports **2.4 GHz only**. Campus networks with a login page or an enterprise login will not work; use a phone hotspot (on iPhone, enable "Maximize Compatibility").
 - `.gitignore` must contain `.pio/`, `.idea/` and `include/secrets.h`.
 
 ### Device ID
-`DEVICE_ID` in `include/config.h` (default `esp32-hydro-01`) sets the MQTT topic and the `device_id` field. **The dashboard only shows the device it is configured for**, so make sure the frontend's selected device matches.
+`DEVICE_ID` in `include/config.h` (default `esp32-hydro-01`) sets the MQTT topic and the `device_id` field. **Register this exact ID in the dashboard** (Devices → Register device). The backend drops telemetry from unregistered IDs.
 
 ### Build, upload, monitor
 In CLion's PlatformIO panel, use **Upload and Monitor**, or from the terminal:
@@ -163,7 +167,9 @@ Tests the pH/EC conversion, temperature compensation and range checks in `lib/hy
 | `hydroponics/{device_id}/telemetry` | ESP32 → broker | 1 | No | JSON reading (below) |
 | `hydroponics/{device_id}/status` | ESP32 → broker | 1 | Yes | `online` on connect; `offline` sent by the broker as the **Last Will (LWT)** |
 
-The backend subscribes to `hydroponics/+/telemetry`. The status topic is not consumed by the backend yet; it is available for monitoring and future offline alerts.
+The backend subscribes to `hydroponics/+/telemetry`. It drops messages whose payload `device_id` differs from the topic, and messages from device IDs nobody has registered. The status topic is not consumed by the backend yet; it is available for monitoring and future offline alerts.
+
+The broker requires a login. All devices share one account (`MQTT_DEVICE_USERNAME` / `MQTT_DEVICE_PASSWORD` in the repo's `.env`), which may only publish to `hydroponics/+/telemetry` and `hydroponics/+/status`.
 
 ### Telemetry payload
 Identical to the backend's `POST /readings` body:
@@ -185,12 +191,12 @@ Identical to the backend's `POST /readings` body:
 |---|---|---|---|---|
 | `device_id` | string | — | firmware constant | required |
 | `ph` | number / null | pH | ADS1115 (planned) | 0–14 |
-| `ec_ms_cm` | number / null | mS/cm | ADS1115 (planned) | ≥ 0 |
+| `ec_ms_cm` | number / null | mS/cm | ADS1115 (planned) | 0–20 |
 | `water_temp_c` | number / null | °C | DS18B20 | −10 to 60 |
 | `air_temp_c` | number / null | °C | BME280 (planned) | −20 to 60 |
 | `humidity_pct` | number / null | % RH | BME280 (planned) | 0–100 |
-| `pressure_hpa` | number / null | hPa | BME280 (planned) | none |
-| `recorded_at` | RFC3339 string, UTC | — | NTP clock | defaults to server time if omitted |
+| `pressure_hpa` | number / null | hPa | BME280 (planned) | 300–1100 |
+| `recorded_at` | RFC3339 string, UTC | — | NTP clock | defaults to server time if omitted; rejected if > 5 min in the future |
 
 ### Firmware rules
 - **Failed or unavailable sensors send `null`**, never placeholder values. DS18B20's `-127` (disconnected) and `85.0` (power-on reset) are treated as failures.
@@ -216,24 +222,26 @@ Identical to the backend's `POST /readings` body:
 
 ---
 
-## 6. Local development broker (macOS)
+## 6. Local development broker
+
+The broker runs in Docker together with the backend and MySQL (see the repository README):
 
 ```bash
-brew install mosquitto
-printf "listener 1883 0.0.0.0\nallow_anonymous true\n" > ~/mosquitto-dev.conf
-mosquitto -c ~/mosquitto-dev.conf -v             # Terminal 1: the broker
-ipconfig getifaddr en0                            # Mac's IP → MQTT_HOST in secrets.h
-mosquitto_sub -h localhost -t 'hydroponics/#' -v  # Terminal 2: watch all messages
+cp .env.example .env                 # in the repo root; set the MQTT_* passwords
+docker compose up -d --build         # Mosquitto on :1883 with username/password auth
+ipconfig getifaddr en0               # Mac's IP → MQTT_HOST in secrets.h
+docker compose exec mosquitto mosquitto_sub -h 127.0.0.1 \
+  -u pulse-backend -P "<MQTT_BACKEND_PASSWORD>" -t 'hydroponics/#' -v   # watch all messages
 ```
 
 - The Mac and the ESP32 must be on the **same network**.
-- `allow_anonymous true` is for local testing only. **Never use it on EC2.**
-- **Only one broker may run.** Homebrew can start a background Mosquitto at login that listens on `127.0.0.1` / `::1`. It silently captures `localhost` subscribers (including the backend) while the ESP32 talks to the other broker. Check and fix:
+- **Only one broker may run on port 1883.** Stop any Homebrew Mosquitto first:
   ```bash
-  lsof -nP -iTCP:1883 -sTCP:LISTEN     # must show exactly one mosquitto
-  brew services stop mosquitto          # stop the background service
+  lsof -nP -iTCP:1883 -sTCP:LISTEN     # must show only Docker
+  brew services stop mosquitto
   ```
 - The hotspot may assign the Mac a new IP after reconnecting. If MQTT fails, check `MQTT_HOST` first.
+- MQTT return code 4 or 5 on connect means `MQTT_USER` / `MQTT_PASSWORD` don't match `.env`.
 
 ---
 
@@ -263,8 +271,7 @@ mosquitto_sub -h localhost -t 'hydroponics/#' -v  # Terminal 2: watch all messag
 2. **Periodic MQTT reconnects (~every 50 s on the phone hotspot).** The PUBACK sometimes arrives late or not at all; the firmware reconnects and re-sends the reading.
    *Next step:* test `WiFi.setSleep(false)` once power is fixed (it increases current draw).
 3. **LWT flapping.** Each reconnect makes the broker publish `offline`, followed by `online` about 1 s later. Any future offline alert must be debounced (alert only if the device stays offline or `recorded_at` goes stale).
-4. **Possible duplicate rows after a retry.** When a PUBACK times out but the broker did receive the message, the re-sent reading is stored twice, because the backend's `(device_id, recorded_at)` index is not `UNIQUE`.
-   *Optional DB-only fix:* make that index `UNIQUE`. The duplicate insert then fails and is logged, with no code or frontend changes. Impact without the fix: an occasional duplicate chart point.
+4. ~~**Possible duplicate rows after a retry.**~~ **Fixed in the backend:** `(device_id, recorded_at)` is now `UNIQUE`, so a re-sent reading is stored once and the duplicate is logged.
 5. **"All sensors failed" is not reported.** Readings with no valid values are skipped (the backend would reject them), so a total sensor failure shows up only as missing data.
 
 ---
@@ -275,7 +282,8 @@ mosquitto_sub -h localhost -t 'hydroponics/#' -v  # Terminal 2: watch all messag
 - [ ] Wire ADS1115 + pH/EC probes; two-point calibration; temperature compensation using `water_temp_c`
 - [ ] Wire BME280
 - [ ] Switch `PUBLISH_INTERVAL_MS` to 60 s for deployment
-- [ ] Move broker to EC2 with authentication (and TLS on port 8883); update `MQTT_HOST` and add credentials
+- [x] Broker authentication (`MQTT_USER` / `MQTT_PASSWORD`)
+- [ ] Move broker to EC2 (`docker compose --profile prod`) and update `MQTT_HOST`; optionally TLS on port 8883
 - [ ] If the backend is extended later: send per-sensor fault flags and raw probe voltages for calibration review
 
 ---

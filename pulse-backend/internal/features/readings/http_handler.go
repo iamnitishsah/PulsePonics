@@ -1,128 +1,182 @@
 package readings
 
 import (
-	"database/sql"
-	"encoding/json"
+	"context"
 	"errors"
-	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
+
+	"pulse-backend/internal/features/devices"
+	"pulse-backend/internal/platform/apperr"
+	"pulse-backend/internal/platform/authctx"
+	"pulse-backend/internal/platform/httpx"
 )
 
-type ReadingHandler struct {
-	service *ReadingService
+// DeviceAccess is the slice of the device registry the handlers need.
+type DeviceAccess interface {
+	Authorize(ctx context.Context, userID int64, deviceID string) error
+	ByAPIKey(ctx context.Context, key string) (*devices.Device, error)
 }
 
-func NewHTTPHandler(s *ReadingService) *ReadingHandler {
-	return &ReadingHandler{service: s}
+type Handler struct {
+	service *Service
+	devices DeviceAccess
 }
 
-type errorResponse struct {
-	Error string `json:"error"`
+func NewHandler(service *Service, devices DeviceAccess) *Handler {
+	return &Handler{service: service, devices: devices}
 }
 
-func writeJSON(w http.ResponseWriter, status int, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(payload)
+func (h *Handler) Register(mux *http.ServeMux, auth func(http.HandlerFunc) http.HandlerFunc) {
+	// Device ingestion: authenticated with the device's API key, not a user token.
+	mux.HandleFunc("POST /api/readings", h.ingest)
+
+	mux.HandleFunc("GET /api/devices/{deviceID}/readings", auth(h.history))
+	mux.HandleFunc("GET /api/devices/{deviceID}/readings/latest", auth(h.latest))
+	mux.HandleFunc("GET /api/devices/{deviceID}/readings/recent", auth(h.recent))
+	mux.HandleFunc("GET /api/metrics", h.metrics)
 }
 
-func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, errorResponse{Error: message})
-}
-
-func (h *ReadingHandler) CreateReading(w http.ResponseWriter, r *http.Request) {
-	var input NewReadingInput
-
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+func (h *Handler) ingest(w http.ResponseWriter, r *http.Request) {
+	key := strings.TrimSpace(r.Header.Get("X-Device-Key"))
+	if key == "" {
+		httpx.WriteError(w, r, apperr.Unauthorized("missing X-Device-Key header"))
 		return
 	}
-
-	id, err := h.service.SubmitReading(r.Context(), input)
+	device, err := h.devices.ByAPIKey(r.Context(), key)
 	if err != nil {
-		switch {
-		case errors.Is(err, ErrMissingDeviceID),
-			errors.Is(err, ErrNoSensorData),
-			errors.Is(err, ErrInvalidPH),
-			errors.Is(err, ErrInvalidEC),
-			errors.Is(err, ErrInvalidWaterTemp),
-			errors.Is(err, ErrInvalidAirTemp),
-			errors.Is(err, ErrInvalidHumidity):
-			writeError(w, http.StatusBadRequest, err.Error())
-		default:
-			log.Printf("CreateReading: unexpected error: %v", err)
-			writeError(w, http.StatusInternalServerError, "failed to save reading")
-		}
+		httpx.WriteError(w, r, err)
+		return
+	}
+	if device == nil {
+		httpx.WriteError(w, r, apperr.Unauthorized("invalid device key"))
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, map[string]any{"id": id})
+	var in Input
+	if err := httpx.DecodeJSON(w, r, &in); err != nil {
+		httpx.WriteError(w, r, err)
+		return
+	}
+	if in.DeviceID == "" {
+		in.DeviceID = device.DeviceID
+	}
+	if in.DeviceID != device.DeviceID {
+		httpx.WriteError(w, r, apperr.Forbidden("device_id does not match the device key"))
+		return
+	}
+
+	reading, err := h.service.Ingest(r.Context(), in)
+	switch {
+	case errors.Is(err, ErrDuplicate):
+		httpx.WriteError(w, r, apperr.Conflict("a reading with this recorded_at is already stored"))
+	case err != nil:
+		httpx.WriteError(w, r, err)
+	default:
+		httpx.WriteJSON(w, http.StatusCreated, reading)
+	}
 }
 
-func (h *ReadingHandler) GetHistory(w http.ResponseWriter, r *http.Request) {
+// authorize checks the device belongs to the caller and returns its ID.
+func (h *Handler) authorize(w http.ResponseWriter, r *http.Request) (string, bool) {
+	deviceID := r.PathValue("deviceID")
+	if err := h.devices.Authorize(r.Context(), authctx.UserID(r.Context()), deviceID); err != nil {
+		httpx.WriteError(w, r, err)
+		return "", false
+	}
+	return deviceID, true
+}
+
+func (h *Handler) history(w http.ResponseWriter, r *http.Request) {
+	deviceID, ok := h.authorize(w, r)
+	if !ok {
+		return
+	}
 	q := r.URL.Query()
-
-	deviceID := q.Get("device_id")
-
-	from := parseTimeOrZero(q.Get("from"))
-	to := parseTimeOrZero(q.Get("to"))
-	limit := parseIntOrZero(q.Get("limit"))
-	offset := parseIntOrZero(q.Get("offset"))
-
-	readings, err := h.service.GetHistory(r.Context(), deviceID, from, to, limit, offset)
-	if err != nil {
-		if errors.Is(err, ErrMissingDeviceID) {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "failed to fetch readings")
+	var (
+		query HistoryQuery
+		err   error
+	)
+	if query.From, err = parseTime(q.Get("from"), "from"); err != nil {
+		httpx.WriteError(w, r, err)
+		return
+	}
+	if query.To, err = parseTime(q.Get("to"), "to"); err != nil {
+		httpx.WriteError(w, r, err)
+		return
+	}
+	if query.MaxPoints, err = parseInt(q.Get("max_points"), "max_points"); err != nil {
+		httpx.WriteError(w, r, err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, readings)
-}
-
-func (h *ReadingHandler) GetLatest(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-
-	deviceID := q.Get("device_id")
-
-	reading, err := h.service.GetLatest(r.Context(), deviceID)
+	history, err := h.service.History(r.Context(), deviceID, query)
 	if err != nil {
-		switch {
-		case errors.Is(err, ErrMissingDeviceID):
-			writeError(w, http.StatusBadRequest, err.Error())
-		case errors.Is(err, sql.ErrNoRows):
-			writeError(w, http.StatusNotFound, "no readings found for this device")
-		default:
-			writeError(w, http.StatusInternalServerError, "failed to fetch latest reading")
-		}
+		httpx.WriteError(w, r, err)
 		return
 	}
-
-	writeJSON(w, http.StatusOK, reading)
+	httpx.WriteJSON(w, http.StatusOK, history)
 }
 
-func parseTimeOrZero(s string) time.Time {
+func (h *Handler) latest(w http.ResponseWriter, r *http.Request) {
+	deviceID, ok := h.authorize(w, r)
+	if !ok {
+		return
+	}
+	reading, err := h.service.Latest(r.Context(), deviceID)
+	if err != nil {
+		httpx.WriteError(w, r, err)
+		return
+	}
+	if reading == nil {
+		httpx.WriteError(w, r, apperr.NotFound("no readings yet for this device"))
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, reading)
+}
+
+func (h *Handler) recent(w http.ResponseWriter, r *http.Request) {
+	deviceID, ok := h.authorize(w, r)
+	if !ok {
+		return
+	}
+	limit, err := parseInt(r.URL.Query().Get("limit"), "limit")
+	if err != nil {
+		httpx.WriteError(w, r, err)
+		return
+	}
+	readings, err := h.service.Recent(r.Context(), deviceID, limit)
+	if err != nil {
+		httpx.WriteError(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, readings)
+}
+
+func (h *Handler) metrics(w http.ResponseWriter, _ *http.Request) {
+	httpx.WriteJSON(w, http.StatusOK, Metrics)
+}
+
+func parseTime(s, field string) (time.Time, error) {
 	if s == "" {
-		return time.Time{}
+		return time.Time{}, nil
 	}
 	t, err := time.Parse(time.RFC3339, s)
 	if err != nil {
-		return time.Time{}
+		return time.Time{}, apperr.Invalid(field, field+" must be an RFC3339 time, e.g. 2026-10-24T08:20:00Z")
 	}
-	return t
+	return t, nil
 }
 
-func parseIntOrZero(s string) int {
+func parseInt(s, field string) (int, error) {
 	if s == "" {
-		return 0
+		return 0, nil
 	}
 	n, err := strconv.Atoi(s)
-	if err != nil {
-		return 0
+	if err != nil || n < 0 {
+		return 0, apperr.Invalid(field, field+" must be a non-negative integer")
 	}
-	return n
+	return n, nil
 }

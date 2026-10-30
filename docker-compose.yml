@@ -1,0 +1,122 @@
+# PulsePonics stack. Copy .env.example to .env and fill it in first.
+#
+#   Local:                 docker compose up -d --build
+#   Local + simulator:     docker compose --profile sim up -d --build
+#   EC2 (HTTPS via Caddy): docker compose --profile prod up -d --build
+#
+# The frontend is not in this file: run it with `npm run dev` locally, and
+# deploy it to Vercel with VITE_API_URL=https://$API_DOMAIN.
+
+name: pulseponics
+
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    # Small-instance tuning: a t2/t3.micro has 1 GB of RAM.
+    command:
+      - --innodb-buffer-pool-size=64M
+      - --performance-schema=OFF
+      - --skip-name-resolve
+    environment:
+      MYSQL_DATABASE: ${DB_NAME:-pulseponics}
+      MYSQL_USER: ${DB_USER:-pulse}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?set DB_ROOT_PASSWORD in .env}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    ports:
+      # Only reachable from this machine (MySQL Workbench, mysql CLI).
+      - "127.0.0.1:${MYSQL_HOST_PORT:-3307}:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/pulse/entrypoint.sh"]
+    environment:
+      MQTT_BACKEND_USERNAME: ${MQTT_BACKEND_USERNAME:-pulse-backend}
+      MQTT_BACKEND_PASSWORD: ${MQTT_BACKEND_PASSWORD:?set MQTT_BACKEND_PASSWORD in .env}
+      MQTT_DEVICE_USERNAME: ${MQTT_DEVICE_USERNAME:-pulse-device}
+      MQTT_DEVICE_PASSWORD: ${MQTT_DEVICE_PASSWORD:?set MQTT_DEVICE_PASSWORD in .env}
+    volumes:
+      - ./deploy/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./deploy/mosquitto/entrypoint.sh:/pulse/entrypoint.sh:ro
+      - mosquitto-data:/mosquitto/data
+    ports:
+      # Public: the ESP32 connects here (MQTT_HOST/MQTT_PORT in secrets.h).
+      - "${MQTT_HOST_PORT:-1883}:1883"
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -h 127.0.0.1 -u \"$$MQTT_BACKEND_USERNAME\" -P \"$$MQTT_BACKEND_PASSWORD\" -t '$$SYS/broker/uptime' -C 1 -W 3 > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./pulse-backend
+    image: ${BACKEND_IMAGE:-pulseponics-backend:local}
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      mosquitto:
+        condition: service_healthy
+    environment:
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_NAME: ${DB_NAME:-pulseponics}
+      DB_USER: ${DB_USER:-pulse}
+      DB_PASSWORD: ${DB_PASSWORD}
+      SERVER_PORT: "8080"
+      MQTT_BROKER_URL: tcp://mosquitto:1883
+      MQTT_USERNAME: ${MQTT_BACKEND_USERNAME:-pulse-backend}
+      MQTT_PASSWORD: ${MQTT_BACKEND_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env (openssl rand -hex 32)}
+      ACCESS_TOKEN_TTL: ${ACCESS_TOKEN_TTL:-15m}
+      REFRESH_TOKEN_TTL: ${REFRESH_TOKEN_TTL:-168h}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
+      TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-false}
+    ports:
+      # Localhost only. On EC2 the public entry point is Caddy (443).
+      - "127.0.0.1:${BACKEND_HOST_PORT:-8080}:8080"
+
+  caddy:
+    profiles: ["prod"]
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      API_DOMAIN: ${API_DOMAIN:-} # required for this profile; Caddy fails to start without it
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+  simulator:
+    profiles: ["sim"]
+    build: ./pulse-simulator
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      MQTT_BROKER_URL: tcp://mosquitto:1883
+      MQTT_USERNAME: ${MQTT_DEVICE_USERNAME:-pulse-device}
+      MQTT_PASSWORD: ${MQTT_DEVICE_PASSWORD}
+      SIM_DEVICE_ID: ${SIM_DEVICE_ID:-esp32-sim-01}
+    command: ["-interval", "${SIM_INTERVAL:-10s}"]
+
+volumes:
+  mysql-data:
+  mosquitto-data:
+  caddy-data:
+  caddy-config:

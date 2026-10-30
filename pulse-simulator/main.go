@@ -1,114 +1,148 @@
-// cmd/simulator/main.go
+// Command simulator stands in for the ESP32 firmware. It speaks the same MQTT
+// contract as pulse-hardware (README section 4): QoS 1 telemetry on
+// hydroponics/{device_id}/telemetry, and a retained online/offline status with
+// a Last Will. It does not import backend code; it only shares the JSON wire
+// format, exactly like the real device.
 //
-// This simulates your ESP32 firmware (Sprint 1) before real hardware
-// exists. It publishes fake-but-realistic sensor readings to the same MQTT
-// topic your real device will eventually use — so when hardware arrives,
-// you literally just stop running this program and start the real ESP32;
-// nothing on the Go backend side changes.
+//	go run . -device esp32-hydro-01 -interval 10s
+//
+// The device must be registered in the dashboard first, or the backend drops
+// its telemetry.
 package main
 
 import (
 	"encoding/json"
 	"flag"
 	"log"
-	"math/rand"
+	"math"
+	"math/rand/v2"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	paho "github.com/eclipse/paho.mqtt.golang"
 )
 
-// telemetryPayload mirrors the readings feature's NewReadingInput JSON shape.
-// We don't import that package here on purpose — this simulator represents
-// an entirely separate physical device (the ESP32) that has no knowledge
-// of your Go backend's internal types. It only needs to agree on the JSON
-// wire format, exactly like real firmware would.
+// telemetryPayload mirrors the firmware's JSON (pulse-hardware README,
+// "Telemetry payload"). Pointers so a disabled sensor is sent as null.
 type telemetryPayload struct {
-	DeviceID    string  `json:"device_id"`
-	PH          float64 `json:"ph"`
-	ECmScm      float64 `json:"ec_ms_cm"`
-	WaterTempC  float64 `json:"water_temp_c"`
-	AirTempC    float64 `json:"air_temp_c"`
-	HumidityPct float64 `json:"humidity_pct"`
-	PressureHPa float64 `json:"pressure_hpa"`
-	RecordedAt  string  `json:"recorded_at"` // RFC3339 — real ESP32 would use its NTP-synced clock
+	DeviceID    string   `json:"device_id"`
+	PH          *float64 `json:"ph"`
+	ECmScm      *float64 `json:"ec_ms_cm"`
+	WaterTempC  *float64 `json:"water_temp_c"`
+	AirTempC    *float64 `json:"air_temp_c"`
+	HumidityPct *float64 `json:"humidity_pct"`
+	PressureHPa *float64 `json:"pressure_hpa"`
+	RecordedAt  string   `json:"recorded_at"` // RFC3339 UTC, like the NTP clock on the ESP32
+}
+
+// signalGen drifts slowly around a target, like a real tank: a random walk
+// pulled back toward the target, clamped to the sensor's range.
+type signalGen struct {
+	value, target, step, pull, min, max float64
+}
+
+func (s *signalGen) next() *float64 {
+	s.value += (rand.Float64()*2-1)*s.step + (s.target-s.value)*s.pull
+	s.value = math.Max(s.min, math.Min(s.max, s.value))
+	v := math.Round(s.value*100) / 100 // 2 decimals, like the firmware's round2
+	return &v
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 
 func main() {
-	// Command-line flags let you simulate multiple devices or tune the
-	// interval without editing code — e.g.
-	//   go run cmd/simulator/main.go -device esp32-tank-02 -interval 10s
-	brokerURL := flag.String("broker", "tcp://localhost:1883", "MQTT broker URL")
-	deviceID := flag.String("device", "esp32-tank-01", "simulated device ID")
-	interval := flag.Duration("interval", 10*time.Second, "publish interval")
+	brokerURL := flag.String("broker", envOr("MQTT_BROKER_URL", "tcp://localhost:1883"), "MQTT broker URL")
+	username := flag.String("username", envOr("MQTT_USERNAME", ""), "MQTT username (the shared device login)")
+	password := flag.String("password", envOr("MQTT_PASSWORD", ""), "MQTT password")
+	deviceID := flag.String("device", envOr("SIM_DEVICE_ID", "esp32-hydro-01"), "device ID (must be registered in the dashboard)")
+	interval := flag.Duration("interval", 10*time.Second, "publish interval (firmware: 10s dev, 60s deployment)")
+	waterOnly := flag.Bool("water-only", false, "send only water_temp_c, like the current hardware build (DS18B20 only)")
 	flag.Parse()
 
-	topic := "hydroponics/" + *deviceID + "/telemetry"
+	telemetryTopic := "hydroponics/" + *deviceID + "/telemetry"
+	statusTopic := "hydroponics/" + *deviceID + "/status"
 
-	opts := paho.NewClientOptions()
-	opts.AddBroker(*brokerURL)
-	opts.SetClientID("simulator-" + *deviceID)
+	opts := paho.NewClientOptions().
+		AddBroker(*brokerURL).
+		SetClientID("simulator-"+*deviceID).
+		SetUsername(*username).
+		SetPassword(*password).
+		SetWill(statusTopic, "offline", 1, true).
+		SetAutoReconnect(true).
+		SetConnectRetry(true).
+		SetConnectRetryInterval(5 * time.Second)
+	opts.SetOnConnectHandler(func(c paho.Client) {
+		log.Printf("connected to %s", *brokerURL)
+		c.Publish(statusTopic, 1, true, "online")
+	})
+	opts.SetConnectionLostHandler(func(_ paho.Client, err error) {
+		log.Printf("connection lost: %v (reconnecting)", err)
+	})
 
 	client := paho.NewClient(opts)
-	token := client.Connect()
-	token.Wait()
-	if err := token.Error(); err != nil {
-		log.Fatalf("simulator: failed to connect to broker: %v", err)
+	if token := client.Connect(); token.WaitTimeout(30*time.Second) && token.Error() != nil {
+		log.Fatalf("connect: %v", token.Error())
 	}
-	defer client.Disconnect(250)
 
-	log.Printf("🌱 simulator started — publishing to %s every %s", topic, *interval)
+	gens := map[string]*signalGen{
+		"ph":       {value: 6.0, target: 6.0, step: 0.04, pull: 0.02, min: 4.5, max: 7.5},
+		"ec":       {value: 1.8, target: 1.8, step: 0.03, pull: 0.02, min: 0.8, max: 3.0},
+		"water":    {value: 21.0, target: 21.0, step: 0.08, pull: 0.02, min: 15, max: 28},
+		"air":      {value: 24.0, target: 24.0, step: 0.12, pull: 0.02, min: 16, max: 34},
+		"humidity": {value: 60.0, target: 60.0, step: 0.6, pull: 0.02, min: 35, max: 85},
+		"pressure": {value: 1013.0, target: 1013.0, step: 0.15, pull: 0.01, min: 995, max: 1030},
+	}
 
-	// time.Tick gives us a channel that fires every `interval`. Combined
-	// with the for-range below, this is Go's idiomatic way to run
-	// "do X every N seconds forever" without manual sleep-loop bookkeeping.
+	publish := func() {
+		p := telemetryPayload{
+			DeviceID:   *deviceID,
+			WaterTempC: gens["water"].next(),
+			RecordedAt: time.Now().UTC().Format(time.RFC3339),
+		}
+		if !*waterOnly {
+			p.PH = gens["ph"].next()
+			p.ECmScm = gens["ec"].next()
+			p.AirTempC = gens["air"].next()
+			p.HumidityPct = gens["humidity"].next()
+			p.PressureHPa = gens["pressure"].next()
+		}
+		data, err := json.Marshal(p)
+		if err != nil {
+			log.Printf("marshal: %v", err)
+			return
+		}
+		token := client.Publish(telemetryTopic, 1, false, data)
+		if !token.WaitTimeout(5*time.Second) || token.Error() != nil {
+			log.Printf("publish failed (no PUBACK): %v", token.Error())
+			return
+		}
+		log.Printf("published %s", data)
+	}
+
+	log.Printf("simulating %s every %s on %s", *deviceID, *interval, telemetryTopic)
+	publish()
+
 	ticker := time.NewTicker(*interval)
 	defer ticker.Stop()
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
-	// Publish one reading immediately on startup too, rather than waiting
-	// for the first tick — useful so you see output right away instead of
-	// waiting a full interval.
-	publishReading(client, topic, *deviceID)
-
-	for range ticker.C {
-		publishReading(client, topic, *deviceID)
+	for {
+		select {
+		case <-ticker.C:
+			publish()
+		case <-stop:
+			// A clean disconnect does not trigger the Last Will, so publish offline ourselves.
+			client.Publish(statusTopic, 1, true, "offline").WaitTimeout(2 * time.Second)
+			client.Disconnect(250)
+			return
+		}
 	}
-}
-
-// publishReading generates one plausible-looking reading and publishes it.
-// Values are randomized within realistic hydroponic ranges (not wild
-// noise) so the data looks like something a real system would produce —
-// useful for testing your dashboard/alerting logic meaningfully later.
-func publishReading(client paho.Client, topic, deviceID string) {
-	payload := telemetryPayload{
-		DeviceID:    deviceID,
-		PH:          round2(5.5 + rand.Float64()*1.5),   // 5.5–7.0, typical hydroponic range
-		ECmScm:      round2(1.2 + rand.Float64()*1.0),   // 1.2–2.2 mS/cm
-		WaterTempC:  round2(19.0 + rand.Float64()*6.0),  // 19–25°C
-		AirTempC:    round2(22.0 + rand.Float64()*6.0),  // 22–28°C
-		HumidityPct: round2(45.0 + rand.Float64()*25.0), // 45–70%
-		PressureHPa: round2(1008.0 + rand.Float64()*10), // ~1008–1018 hPa
-		RecordedAt:  time.Now().Format(time.RFC3339),
-	}
-
-	data, err := json.Marshal(payload)
-	if err != nil {
-		log.Printf("simulator: failed to marshal payload: %v", err)
-		return
-	}
-
-	// QoS 1 to match the subscriber's expectation. Wait() to confirm the
-	// broker actually accepted it before we log success.
-	token := client.Publish(topic, 1, false, data)
-	token.Wait()
-	if err := token.Error(); err != nil {
-		log.Printf("simulator: publish failed: %v", err)
-		return
-	}
-
-	log.Printf("📤 published: ph=%.2f ec=%.2f water=%.1f°C air=%.1f°C humidity=%.1f%% pressure=%.1fhPa",
-		payload.PH, payload.ECmScm, payload.WaterTempC, payload.AirTempC, payload.HumidityPct, payload.PressureHPa)
-}
-
-func round2(v float64) float64 {
-	return float64(int(v*100)) / 100
 }

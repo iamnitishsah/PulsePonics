@@ -1,5 +1,5 @@
 #pragma once
-// MQTT connection to the broker (MQTT_HOST / MQTT_PORT in include/secrets.h).
+// MQTT connection to the broker (MQTT_HOST / MQTT_PORT / MQTT_USER / MQTT_PASSWORD in include/secrets.h).
 //   hydroponics/{DEVICE_ID}/telemetry  QoS 1, not retained
 //   hydroponics/{DEVICE_ID}/status     "online" (retained) / "offline" via Last Will
 

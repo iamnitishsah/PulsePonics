@@ -8,6 +8,10 @@
 #include "config.h"
 #include "secrets.h"
 
+#if !defined(MQTT_USER) || !defined(MQTT_PASSWORD)
+#error "Add MQTT_USER and MQTT_PASSWORD to include/secrets.h (see include/secrets.example.h)"
+#endif
+
 namespace mqtt_link {
 
 namespace {
@@ -43,8 +47,9 @@ bool ensureConnected() {
 
   Serial.printf("MQTT connecting to %s:%d ... ", MQTT_HOST, MQTT_PORT);
   client.setWill(topicStatus.c_str(), "offline", true, 1);   // LWT: retained, QoS 1
-  if (!client.connect(DEVICE_ID)) {
+  if (!client.connect(DEVICE_ID, MQTT_USER, MQTT_PASSWORD)) {
     // err -3 = network/broker unreachable (wrong MQTT_HOST, broker down, other network)
+    // rc 4/5 = broker rejected MQTT_USER / MQTT_PASSWORD
     Serial.printf("FAILED (err %d, rc %d)\n", (int)client.lastError(), (int)client.returnCode());
     return false;
   }

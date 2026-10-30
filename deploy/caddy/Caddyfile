@@ -1,0 +1,8 @@
+# HTTPS reverse proxy for the API (docker compose --profile prod).
+# Caddy obtains and renews a Let's Encrypt certificate for API_DOMAIN on its
+# own; ports 80 and 443 must be open to the internet. WebSockets (/api/ws)
+# are proxied automatically.
+{$API_DOMAIN} {
+	encode gzip
+	reverse_proxy backend:8080
+}
