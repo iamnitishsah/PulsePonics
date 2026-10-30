@@ -1,0 +1,12 @@
+readings_ingested 2160
+history_bucket_seconds 60 history_points 361
+alert ph high opened_h 2.5778 resolved_h 3.5556 trigger 6.54
+latency ingest_post p50 2.57 p95 4.71
+latency latest p50 1.25 p95 1.86
+latency devices p50 1.97 p95 3.19
+latency history_1h_raw p50 3.64 p95 6.13
+latency history_6h_agg p50 6.32 p95 13.63
+latency alerts p50 1.07 p95 1.51
+latency login_bcrypt p50 111.84 p95 184.75
+e2e_mqtt_to_ws p50 1.94 p95 3.12 max 4.05 n 200
+duplicates_published 3 stored 2
