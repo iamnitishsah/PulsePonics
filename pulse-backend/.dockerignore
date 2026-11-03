@@ -3,3 +3,10 @@
 .idea
 .DS_Store
 *.test
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/

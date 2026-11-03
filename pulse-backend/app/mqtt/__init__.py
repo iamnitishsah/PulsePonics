@@ -1,0 +1,2 @@
+"""MQTT background ingestion worker."""
+
