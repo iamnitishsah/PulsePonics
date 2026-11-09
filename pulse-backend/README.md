@@ -4,6 +4,17 @@ Python service for PulsePonics built with **FastAPI**, **Pydantic v2**, **SQLAlc
 
 The telemetry contract (topics, payload, ranges) comes from `../pulse-hardware/README.md`. The full HTTP reference is in [API_DOCUMENTATION.md](API_DOCUMENTATION.md).
 
+## Production Deployment (AWS EC2)
+
+The backend is deployed on an AWS EC2 Ubuntu instance behind a Caddy reverse proxy:
+- **Public IPv4**: `3.26.224.103`
+- **Domain**: `https://3-26-224-103.sslip.io`
+- **Swagger UI**: `https://3-26-224-103.sslip.io/docs`
+- **ReDoc**: `https://3-26-224-103.sslip.io/redoc`
+- **Health Check**: `https://3-26-224-103.sslip.io/api/healthz`
+
+Deployments are automated through GitHub Actions (`.github/workflows/deploy.yml`) on every push to `main`.
+
 ## Modular Layout
 
 ```text
@@ -86,12 +97,14 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8081 --reload
 ## Interactive API Documentation
 
 FastAPI automatically generates interactive OpenAPI documentation:
-- Swagger UI: `http://localhost:8080/docs`
-- ReDoc: `http://localhost:8080/redoc`
+- **Local Swagger UI**: `http://localhost:8080/docs`
+- **Local ReDoc**: `http://localhost:8080/redoc`
+- **Production Swagger UI**: `https://3-26-224-103.sslip.io/docs`
+- **Production ReDoc**: `https://3-26-224-103.sslip.io/redoc`
 
 ## Tests
 
 ```bash
-pytest tests/                   # Run all async unit tests
+pytest tests/ -v                # Run all async unit tests
 ../scripts/smoke-test.sh        # End-to-end smoke test against running stack
 ```

@@ -32,8 +32,12 @@ npm run build      # type-check + production build into dist/
 ## Deploying to Vercel
 
 1. Import the repository and set **Root Directory** to `pulse-frontend`. The Vite preset is detected automatically.
-2. Add the environment variable `VITE_API_URL=https://<API_DOMAIN>` (the EC2 backend, no trailing slash).
-3. On the backend, add the Vercel URL to `CORS_ALLOWED_ORIGINS`, e.g. `https://pulseponics.vercel.app,https://pulseponics-*.vercel.app` for preview deployments.
+2. Add the environment variable pointing to the EC2 backend:
+   ```env
+   VITE_API_URL=https://3-26-224-103.sslip.io
+   ```
+   (AWS EC2 host `3.26.224.103` with Caddy auto-HTTPS).
+3. On the backend, add the Vercel URL to `CORS_ALLOWED_ORIGINS`, e.g. `https://<your-app>.vercel.app,https://<your-app>-*.vercel.app` for preview deployments.
 
 `vercel.json` rewrites every path to `index.html`, so deep links like `/devices/esp32-hydro-01` work on reload.
 

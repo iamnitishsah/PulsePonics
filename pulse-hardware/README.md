@@ -3,7 +3,7 @@
 ESP32 firmware for the **Automated Real-Time Hydroponics Telemetry and Alerting System**. It reads the hydroponic sensors and publishes telemetry over MQTT to the PulsePonics backend.
 
 ```
-DS18B20 ──1-Wire──▶ ESP32 ──Wi-Fi / MQTT──▶ Mosquitto ──▶ pulse-backend (Go) ──▶ MySQL ──▶ REST / WebSocket ──▶ pulse-frontend (React)
+DS18B20 ──1-Wire──▶ ESP32 ──Wi-Fi / MQTT──▶ Mosquitto ──▶ pulse-backend (FastAPI / Python) ──▶ MySQL ──▶ REST / WebSocket ──▶ pulse-frontend (React)
 ```
 
 The firmware publishes the **same JSON shape as the backend's `POST /api/readings`**, so the backend and frontend need no changes. See `../pulse-backend/API_DOCUMENTATION.md`.
@@ -124,7 +124,7 @@ Copy `include/secrets.example.h` to `include/secrets.h` and fill it in:
 #pragma once
 #define WIFI_SSID     "your-2.4GHz-network"
 #define WIFI_PASSWORD "your-password"
-#define MQTT_HOST     "192.168.x.x"   // broker IP (your Mac on the same network, or EC2)
+#define MQTT_HOST     "3.26.224.103"   // EC2 Public IP (or your local IP for dev)
 #define MQTT_PORT     1883
 #define MQTT_USER     "pulse-device"  // MQTT_DEVICE_USERNAME from the repo's .env
 #define MQTT_PASSWORD "..."           // MQTT_DEVICE_PASSWORD from the repo's .env
@@ -222,7 +222,16 @@ Identical to the backend's `POST /readings` body:
 
 ---
 
-## 6. Local development broker
+## 6. Development and production brokers
+
+### Live EC2 production broker
+
+The broker is running on AWS EC2 (`docker compose --profile prod`):
+- **Host**: `3.26.224.103` (or `3-26-224-103.sslip.io`)
+- **Port**: `1883`
+- Set `MQTT_HOST "3.26.224.103"` in `secrets.h` to point the hardware directly to the cloud stack.
+
+### Local development broker
 
 The broker runs in Docker together with the backend and MySQL (see the repository README):
 
@@ -283,7 +292,7 @@ docker compose exec mosquitto mosquitto_sub -h 127.0.0.1 \
 - [ ] Wire BME280
 - [ ] Switch `PUBLISH_INTERVAL_MS` to 60 s for deployment
 - [x] Broker authentication (`MQTT_USER` / `MQTT_PASSWORD`)
-- [ ] Move broker to EC2 (`docker compose --profile prod`) and update `MQTT_HOST`; optionally TLS on port 8883
+- [x] Move broker to EC2 (`3.26.224.103` via `docker compose --profile prod`) and update `MQTT_HOST`; optionally TLS on port 8883
 - [ ] If the backend is extended later: send per-sensor fault flags and raw probe voltages for calibration review
 
 ---

@@ -20,4 +20,6 @@ All results in Chapter 4 were measured on the running Docker stack on 30 October
 
 The telemetry comes from the simulator, not from a physical tank, because the pH/EC/BME280 hardware is scheduled for the second half of the semester. The report says this in Sections 1.4 and 5.3.
 
-Test counts: backend 48 cases (`go test -v ./...`), frontend 8 (`npm test`), firmware 12 (`pio test -e native`), end-to-end 38 (`scripts/smoke-test.sh`).
+Test counts: backend async tests (`cd pulse-backend && pytest tests/ -v`), frontend 8 (`npm test`), firmware 12 (`pio test -e native`), end-to-end 38 (`scripts/smoke-test.sh`).
+
+> **Note on Tech Stack & Cloud Deployment:** Subsequent to the mid-semester evaluation, the backend was migrated to FastAPI (Python 3.12) with SQLAlchemy 2.0 Asyncio for enhanced data science and ML extensibility. The platform is deployed live on AWS EC2 at Public IPv4 `3.26.224.103` (`https://3-26-224-103.sslip.io`) with Caddy automatic TLS and GitHub Actions CI/CD.

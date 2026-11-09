@@ -1,6 +1,10 @@
 # PulsePonics API
 
-Base URL: `http://localhost:8080` locally, `https://<API_DOMAIN>` on EC2. Every route is under `/api`.
+Base URL: `http://localhost:8080` locally, `https://3-26-224-103.sslip.io` on AWS EC2 (`3.26.224.103`). Every route is under `/api`.
+
+Interactive OpenAPI documentation is available at:
+- **Swagger UI**: `/docs` (e.g. `https://3-26-224-103.sslip.io/docs` or `http://localhost:8080/docs`)
+- **ReDoc**: `/redoc` (e.g. `https://3-26-224-103.sslip.io/redoc` or `http://localhost:8080/redoc`)
 
 - Bodies are JSON. Times are RFC 3339 in UTC (`2026-10-24T08:20:00Z`).
 - **User routes** need `Authorization: Bearer <access_token>`.
