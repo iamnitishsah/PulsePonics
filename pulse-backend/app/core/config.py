@@ -5,6 +5,7 @@ import re
 import secrets
 from datetime import timedelta
 from typing import List
+from urllib.parse import quote_plus
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -97,9 +98,11 @@ class Settings(BaseSettings):
 
     @property
     def async_database_url(self) -> str:
-        # aiomysql URL format with UTC timezone session
+        # aiomysql URL format with UTC timezone session (quote user/password for special chars like @, :, #)
+        user = quote_plus(self.db_user)
+        password = quote_plus(self.db_password)
         return (
-            f"mysql+aiomysql://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/"
+            f"mysql+aiomysql://{user}:{password}@{self.db_host}:{self.db_port}/"
             f"{self.db_name}?charset=utf8mb4"
         )
 
