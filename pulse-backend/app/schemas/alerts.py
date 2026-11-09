@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Optional
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Any, List, Optional
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.core.errors import AppError
+from app.core.time import to_ist
 from app.schemas.readings import METRICS, METRICS_BY_KEY
 
 
@@ -64,6 +65,11 @@ class Alert(BaseModel):
     resolved_at: Optional[datetime] = None
     acknowledged_at: Optional[datetime] = None
     status: str = "open"
+
+    @field_validator("opened_at", "resolved_at", "acknowledged_at", mode="before")
+    @classmethod
+    def convert_to_ist(cls, v: Any) -> Any:
+        return to_ist(v) if v is not None else v
 
     def compute_status(self) -> None:
         self.status = "resolved" if self.resolved_at is not None else "open"

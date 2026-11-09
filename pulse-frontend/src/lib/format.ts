@@ -1,14 +1,17 @@
-const dateTime = new Intl.DateTimeFormat(undefined, {
+const TIMEZONE = 'Asia/Kolkata'
+
+const dateTime = new Intl.DateTimeFormat('en-IN', {
+  timeZone: TIMEZONE,
   month: 'short',
   day: 'numeric',
   hour: '2-digit',
   minute: '2-digit',
   second: '2-digit',
 })
-const dateOnly = new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'long', year: 'numeric' })
-const timeOnly = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' })
-const dayAndTime = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
-const dayOnly = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' })
+const dateOnly = new Intl.DateTimeFormat('en-IN', { timeZone: TIMEZONE, day: 'numeric', month: 'long', year: 'numeric' })
+const timeOnly = new Intl.DateTimeFormat('en-IN', { timeZone: TIMEZONE, hour: '2-digit', minute: '2-digit' })
+const dayAndTime = new Intl.DateTimeFormat('en-IN', { timeZone: TIMEZONE, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+const dayOnly = new Intl.DateTimeFormat('en-IN', { timeZone: TIMEZONE, month: 'short', day: 'numeric' })
 
 function toDate(value: string | number | Date | null | undefined) {
   if (value === null || value === undefined) return null

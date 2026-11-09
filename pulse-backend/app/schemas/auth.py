@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.core.errors import AppError
+from app.core.time import to_ist
 
 MIN_PASSWORD_LEN = 8
 MAX_PASSWORD_LEN = 72
@@ -31,6 +32,11 @@ class User(BaseModel):
     name: str
     created_at: datetime
 
+    @field_validator("created_at", mode="before")
+    @classmethod
+    def convert_to_ist(cls, v: Any) -> Any:
+        return to_ist(v) if v is not None else v
+
 
 class Session(BaseModel):
     access_token: str
@@ -38,6 +44,11 @@ class Session(BaseModel):
     refresh_token: str
     refresh_token_expires_at: datetime
     user: User
+
+    @field_validator("access_token_expires_at", "refresh_token_expires_at", mode="before")
+    @classmethod
+    def convert_to_ist(cls, v: Any) -> Any:
+        return to_ist(v) if v is not None else v
 
 
 class SignupInput(BaseModel):

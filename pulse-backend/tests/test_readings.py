@@ -67,3 +67,35 @@ def test_device_from_topic():
     assert device_from_topic("hydroponics/esp32-hydro-01/telemetry") == "esp32-hydro-01"
     assert device_from_topic("hydroponics/telemetry") == ""
 
+
+def test_reading_converts_to_ist():
+    from app.core.time import to_ist, to_utc, IST
+    from app.schemas.readings import Reading, Point
+
+    # Naive UTC from MySQL: 01:30:00
+    naive_utc = datetime(2026, 11, 10, 1, 30, 0)
+    ist_converted = to_ist(naive_utc)
+    assert ist_converted.hour == 7
+    assert ist_converted.minute == 0
+    assert ist_converted.utcoffset() == timedelta(hours=5, minutes=30)
+
+    # In Reading schema
+    r = Reading(
+        id=1,
+        device_id="esp32-hydro-01",
+        water_temp_c=24.5,
+        recorded_at=naive_utc,
+        created_at=naive_utc,
+    )
+    assert r.recorded_at.utcoffset() == timedelta(hours=5, minutes=30)
+    assert r.recorded_at.hour == 7
+    assert r.recorded_at.minute == 0
+
+    # Ensure to_utc converts it back to UTC for DB storage
+    assert to_utc(r.recorded_at) == datetime(2026, 11, 10, 1, 30, 0, tzinfo=timezone.utc)
+
+    # In Point schema
+    p = Point(recorded_at=naive_utc, water_temp_c=24.5)
+    assert p.recorded_at.utcoffset() == timedelta(hours=5, minutes=30)
+    assert p.recorded_at.hour == 7
+

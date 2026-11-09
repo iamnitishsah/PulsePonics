@@ -7,6 +7,7 @@ from typing import Any, List, Optional
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import AppError
+from app.core.time import to_utc, to_ist, utc_now
 from app.schemas.readings import Reading, ReadingInput, Point, History
 from app.services.device_service import DeviceService
 from app.services.alert_service import AlertService
@@ -59,10 +60,13 @@ class ReadingService:
         if not ok:
             raise AppError.not_found("device is not registered")
 
+        # Stored in UTC
+        recorded_at_utc = to_utc(in_data.recorded_at)
+
         # Check for duplicate reading (device_id, recorded_at)
         res = await self.db.execute(
             text("SELECT 1 FROM readings WHERE device_id = :device_id AND recorded_at = :recorded_at"),
-            {"device_id": in_data.device_id, "recorded_at": in_data.recorded_at},
+            {"device_id": in_data.device_id, "recorded_at": recorded_at_utc},
         )
         if res.scalar():
             raise AppError.conflict("a reading with this recorded_at is already stored")
@@ -82,7 +86,7 @@ class ReadingService:
                 "air_temp_c": in_data.air_temp_c,
                 "humidity_pct": in_data.humidity_pct,
                 "pressure_hpa": in_data.pressure_hpa,
-                "recorded_at": in_data.recorded_at,
+                "recorded_at": recorded_at_utc,
             },
         )
         await self.db.commit()
@@ -139,9 +143,9 @@ class ReadingService:
         to_time: Optional[datetime] = None,
         max_points: int = DEFAULT_MAX_POINTS,
     ) -> History:
-        now = datetime.now(timezone.utc)
-        to_t = to_time.astimezone(timezone.utc) if to_time else now
-        from_t = from_time.astimezone(timezone.utc) if from_time else (to_t - DEFAULT_HISTORY_RANGE)
+        now = utc_now()
+        to_t = to_utc(to_time) if to_time else now
+        from_t = to_utc(from_time) if from_time else (to_t - DEFAULT_HISTORY_RANGE)
 
         if not from_t < to_t:
             raise AppError.invalid("from", "from must be before to")

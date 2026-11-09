@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import AppError
+from app.core.time import to_utc, to_ist, utc_now
 from app.schemas.alerts import (
     Threshold,
     Alert,
@@ -141,7 +142,7 @@ class AlertService:
 
         # Resolve alerts for metrics that were just disabled
         open_alerts = await self.get_open_alerts(device_id)
-        now = datetime.now(timezone.utc)
+        now = utc_now()
         for t in in_thresholds:
             if not t.enabled and t.metric in open_alerts:
                 await self._resolve(user_id, open_alerts[t.metric], now)
@@ -193,7 +194,7 @@ class AlertService:
                                 "threshold_value": d.bound,
                                 "trigger_value": v,
                                 "latest_value": v,
-                                "opened_at": r.recorded_at,
+                                "opened_at": to_utc(r.recorded_at),
                             },
                         )
                         await self.db.commit()
@@ -230,7 +231,7 @@ class AlertService:
     async def _resolve(self, user_id: int, a: Alert, at: datetime) -> None:
         await self.db.execute(
             text("UPDATE alerts SET resolved_at = :at WHERE id = :id AND resolved_at IS NULL"),
-            {"at": at, "id": a.id},
+            {"at": to_utc(at), "id": a.id},
         )
         await self.db.commit()
         alert_dict = await self._get_alert_by_id(a.id)
@@ -302,7 +303,7 @@ class AlertService:
         if not res.scalar():
             raise AppError.not_found("alert not found")
 
-        now = datetime.now(timezone.utc)
+        now = utc_now()
         await self.db.execute(
             text("UPDATE alerts SET acknowledged_at = COALESCE(acknowledged_at, :now) WHERE id = :aid"),
             {"now": now, "aid": alert_id},

@@ -4,6 +4,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.core.errors import AppError
+from app.core.time import to_ist, to_utc, utc_now
 from app.schemas.devices import validate_device_id
 
 MAX_CLOCK_SKEW = timedelta(minutes=5)
@@ -42,6 +43,11 @@ class Reading(BaseModel):
     pressure_hpa: Optional[float] = None
     recorded_at: datetime
     created_at: datetime
+
+    @field_validator("recorded_at", "created_at", mode="before")
+    @classmethod
+    def convert_to_ist(cls, v: Any) -> Any:
+        return to_ist(v) if v is not None else v
 
     def get_metric_value(self, metric: str) -> Optional[float]:
         return getattr(self, metric, None)
@@ -101,6 +107,11 @@ class Point(BaseModel):
     humidity_pct: Optional[float] = None
     pressure_hpa: Optional[float] = None
 
+    @field_validator("recorded_at", mode="before")
+    @classmethod
+    def convert_to_ist(cls, v: Any) -> Any:
+        return to_ist(v) if v is not None else v
+
 
 class History(BaseModel):
     device_id: str
@@ -110,4 +121,9 @@ class History(BaseModel):
     points: List[Point]
 
     model_config = ConfigDict(populate_by_name=True)
+
+    @field_validator("from_", "to", mode="before")
+    @classmethod
+    def convert_to_ist(cls, v: Any) -> Any:
+        return to_ist(v) if v is not None else v
 

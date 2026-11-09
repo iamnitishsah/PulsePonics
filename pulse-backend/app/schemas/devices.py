@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any, Optional
 from pydantic import BaseModel, ConfigDict, field_validator
 from app.core.errors import AppError
+from app.core.time import to_ist
 
 DEVICE_ID_REGEX = re.compile(r"^[A-Za-z0-9_-]{3,64}$")
 MAX_NAME_LEN = 100
@@ -35,6 +36,11 @@ class Device(BaseModel):
     name: str
     api_key_prefix: str
     created_at: datetime
+
+    @field_validator("created_at", mode="before")
+    @classmethod
+    def convert_to_ist(cls, v: Any) -> Any:
+        return to_ist(v) if v is not None else v
 
 
 class DeviceWithKey(Device):
