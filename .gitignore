@@ -10,3 +10,6 @@
 *.sw?
 # Local configuration
 .env
+*.pem
+*.key
+
